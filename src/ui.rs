@@ -14,16 +14,8 @@ pub enum DisplayMode {
     Command,
 }
 
-/// 渲染底部状态栏（第一行）
-/// 显示：模式指示 | 画笔颜色预览 | 调色板色块 | 光标坐标 | 状态消息
-/// `row` - 状态栏所在的终端行号
-/// `term_width` - 终端宽度（列数）
-/// `mode` - 当前应用模式
-/// `brush_color` - 当前画笔颜色
-/// `palette` - 10 个调色板颜色
-/// `active_palette_index` - 当前选中的调色板索引
-/// `cursor_x`, `cursor_y` - 画布上的光标逻辑坐标
-/// `status_message` - 要显示的状态消息文本
+/// 渲染底部状态栏
+/// 格式：[模式] 画笔x [颜色块] | 调色板 | (坐标) | 消息
 pub fn render_status_bar(
     stdout: &mut io::Stdout,
     row: u16,
@@ -36,51 +28,41 @@ pub fn render_status_bar(
     cursor_y: u16,
     status_message: &str,
 ) -> io::Result<()> {
-    // 移动光标到状态栏行首
+    // 移动光标到状态栏行首，设置状态栏背景
     crossterm::queue!(
         stdout,
         crossterm::cursor::MoveTo(0, row),
-        // 使用深灰色背景铺满整行，区分画布区域和状态栏
         style::SetBackgroundColor(style::Color::Rgb { r: 40, g: 40, b: 40 }),
         style::SetForegroundColor(style::Color::White),
     )?;
 
-    // 模式指示文本
-    let mode_str = match mode {
-        DisplayMode::Draw => " DRAW ",
-        DisplayMode::Command => " CMD  ",
-    };
-    // 模式标签使用高亮背景
-    let mode_bg = match mode {
-        DisplayMode::Draw => style::Color::Rgb { r: 0, g: 120, b: 215 },
-        DisplayMode::Command => style::Color::Rgb { r: 200, g: 80, b: 0 },
+    // 模式标签
+    let (mode_str, mode_bg) = match mode {
+        DisplayMode::Draw => (" DRAW ", style::Color::Rgb { r: 0, g: 120, b: 215 }),
+        DisplayMode::Command => (" CMD  ", style::Color::Rgb { r: 200, g: 80, b: 0 }),
     };
     crossterm::queue!(
         stdout,
         style::SetBackgroundColor(mode_bg),
         style::SetForegroundColor(style::Color::White),
         style::Print(mode_str),
-        // 恢复状态栏默认背景
         style::SetBackgroundColor(style::Color::Rgb { r: 40, g: 40, b: 40 }),
     )?;
 
-    // 画笔颜色预览：显示两个空格宽的色块 + hex 值
+    // 画笔信息：画笔x [颜色块]
+    // "x" 为当前调色板索引号，颜色块用两个空格背景着色表示
     crossterm::queue!(
         stdout,
-        style::SetForegroundColor(style::Color::Grey),
-        style::Print(" Brush:"),
+        style::SetForegroundColor(style::Color::White),
+        style::Print(format!(" 画笔{active_palette_index} ")),
+        // 颜色块：两个空格宽度，背景色为画笔颜色
         style::SetBackgroundColor(style::Color::Rgb {
             r: brush_color.0,
             g: brush_color.1,
             b: brush_color.2,
         }),
-        style::Print("  "), // 两个空格作为色块
+        style::Print("  "),
         style::SetBackgroundColor(style::Color::Rgb { r: 40, g: 40, b: 40 }),
-        style::SetForegroundColor(style::Color::White),
-        style::Print(format!(
-            " #{:02X}{:02X}{:02X}",
-            brush_color.0, brush_color.1, brush_color.2
-        )),
     )?;
 
     // 调色板色块：显示 0-9 数字键对应的颜色
@@ -98,13 +80,19 @@ pub fn render_status_bar(
                 style::Print("["),
             )?;
         }
-        // 绘制颜色色块（2个空格宽度）
+        // 绘制颜色色块（显示数字编号，背景为对应颜色）
         crossterm::queue!(
             stdout,
             style::SetBackgroundColor(style::Color::Rgb {
                 r: color.0,
                 g: color.1,
                 b: color.2,
+            }),
+            // 根据颜色亮度选择前景色，确保数字可读
+            style::SetForegroundColor(if color.0 as u16 + color.1 as u16 + color.2 as u16 > 382 {
+                style::Color::Black
+            } else {
+                style::Color::White
             }),
             style::Print(format!("{i}")),
             style::SetBackgroundColor(style::Color::Rgb { r: 40, g: 40, b: 40 }),
@@ -135,9 +123,9 @@ pub fn render_status_bar(
     }
 
     // 用空格填充剩余宽度，确保背景颜色覆盖整行
-    // 计算已输出的大致字符数（简化处理：直接用空格填满到行尾）
     crossterm::queue!(
         stdout,
+        style::SetForegroundColor(style::Color::Reset),
         style::SetBackgroundColor(style::Color::Rgb { r: 40, g: 40, b: 40 }),
         style::Print(" ".repeat(term_width as usize)),
     )?;
@@ -149,10 +137,6 @@ pub fn render_status_bar(
 }
 
 /// 渲染命令行输入区域（状态栏下方一行）
-/// `row` - 命令行所在的终端行号
-/// `term_width` - 终端宽度
-/// `command_buffer` - 当前命令输入缓冲区内容
-/// `mode` - 当前模式（仅命令模式时显示输入提示）
 pub fn render_command_line(
     stdout: &mut io::Stdout,
     row: u16,
@@ -164,7 +148,6 @@ pub fn render_command_line(
     crossterm::queue!(
         stdout,
         crossterm::cursor::MoveTo(0, row),
-        // 命令行使用更深的背景色
         style::SetBackgroundColor(style::Color::Rgb { r: 30, g: 30, b: 30 }),
         style::SetForegroundColor(style::Color::White),
     )?;
@@ -200,14 +183,12 @@ pub fn render_command_line(
 }
 
 /// 渲染帮助信息覆盖层
-/// 在画布中央显示半透明帮助面板
-/// `term_width`, `term_height` - 终端尺寸
+/// 在画布中央显示帮助面板
 pub fn render_help(
     stdout: &mut io::Stdout,
     term_width: u16,
     term_height: u16,
 ) -> io::Result<()> {
-    // 帮助文本内容
     let help_lines = [
         "╔══════════════════════════════════════════╗",
         "║          PixTerm 帮助信息                ║",
@@ -215,10 +196,9 @@ pub fn render_help(
         "║  鼠标操作:                               ║",
         "║    左键点击/拖拽  绘制像素               ║",
         "║    右键点击       橡皮擦（清除像素）     ║",
-        "║    滚轮上/下      放大/缩小              ║",
         "║                                          ║",
         "║  键盘快捷键:                             ║",
-        "║    方向键         移动视口               ║",
+        "║    方向键         移动光标               ║",
         "║    空格           在光标位置绘制         ║",
         "║    0-9            切换调色板颜色         ║",
         "║    Ctrl+S         保存画布               ║",
@@ -243,26 +223,13 @@ pub fn render_help(
         "╚══════════════════════════════════════════╝",
     ];
 
-    // 计算帮助面板在终端中的居中起始位置
     let panel_height = help_lines.len() as u16;
-    let panel_width = 44u16; // 帮助面板固定宽度
-    // 水平居中
-    let start_col = if term_width > panel_width {
-        (term_width - panel_width) / 2
-    } else {
-        0
-    };
-    // 垂直居中
-    let start_row = if term_height > panel_height {
-        (term_height - panel_height) / 2
-    } else {
-        0
-    };
+    let panel_width = 44u16;
+    let start_col = term_width.saturating_sub(panel_width) / 2;
+    let start_row = term_height.saturating_sub(panel_height) / 2;
 
-    // 逐行绘制帮助面板
     for (i, line) in help_lines.iter().enumerate() {
         let row = start_row + i as u16;
-        // 超出终端高度则停止
         if row >= term_height {
             break;
         }
@@ -275,7 +242,6 @@ pub fn render_help(
         )?;
     }
 
-    // 重置样式
     crossterm::queue!(stdout, style::ResetColor)?;
 
     Ok(())

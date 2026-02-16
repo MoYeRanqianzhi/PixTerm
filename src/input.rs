@@ -186,21 +186,7 @@ fn handle_mouse_event(app: &mut App, mouse: MouseEvent) {
                 app.finish_stroke();
             }
         }
-        // 鼠标滚轮向上 — 放大
-        MouseEventKind::ScrollUp => {
-            if app.zoom < 8 {
-                app.zoom += 1;
-                app.status_message = format!("缩放: {}x", app.zoom);
-            }
-        }
-        // 鼠标滚轮向下 — 缩小
-        MouseEventKind::ScrollDown => {
-            if app.zoom > 1 {
-                app.zoom -= 1;
-                app.status_message = format!("缩放: {}x", app.zoom);
-            }
-        }
-        // 其他鼠标事件忽略
+        // 其他鼠标事件忽略（缩放通过终端字体大小控制，如 Ctrl+滚轮）
         _ => {}
     }
 }
