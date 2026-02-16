@@ -12,7 +12,7 @@ src/
 ├── command.rs       # 命令模式解析（字符串 → Command 枚举，支持坐标范围）
 ├── history.rs       # 撤销/重做历史栈管理
 ├── color.rs         # 颜色工具：Hex 解析、调色板、预设色
-├── file.rs          # JSON 文件保存/加载（基于边界框序列化）
+├── file.rs          # 文件 I/O：.ptd 压缩保存/加载、.json 纯文本、PNG 导入/导出
 └── ui.rs            # 状态栏、调色板栏、命令行、帮助面板 UI 组件
 ```
 
@@ -76,8 +76,8 @@ pub struct History {
 ```rust
 pub enum Command {
     Help,
-    Save(Option<String>),
-    Load(Option<String>),
+    Save(Option<String>),      // 保存画布（默认 canvas.ptd）
+    Load(Option<String>),      // 加载画布（默认 canvas.ptd）
     Quit,
     Paint {
         x_range: (u16, u16),   // X 坐标范围，单值时 start == end
@@ -89,6 +89,8 @@ pub enum Command {
     Color(u16, u16),
     Clear,
     SetBrushColor(Rgb),
+    Export(Option<String>),     // 导出 PNG（默认 canvas.png）
+    Import(String),            // 导入 PNG（文件名必填）
 }
 ```
 
@@ -119,7 +121,9 @@ pub enum Command {
 - `paint_pixel_stroke()` — 拖拽笔画像素（累积到临时 stroke + 记录脏像素）
 - `finish_stroke()` — 结束笔画（整体入历史栈）
 - `screen_to_canvas()` — 终端坐标 → 画布逻辑坐标
-- `execute_command()` — 命令执行分发（支持范围绘制）
+- `execute_command()` — 命令执行分发（支持范围绘制、导入/导出）
+- `export_png()` — 导出画布为 PNG 图片
+- `import_png()` — 从 PNG 导入像素（重置历史和光标）
 
 ## 坐标系与像素映射
 
@@ -224,9 +228,9 @@ if needs_redraw:
 
 ## 文件格式
 
-JSON 格式，由 `serde` 序列化/反序列化。
+### 数据结构
 
-保存时通过 `bounding_box()` 计算最小包围矩形，仅序列化有内容的区域：
+所有画布数据共用 `SaveData` 结构，由 `serde` 序列化/反序列化：
 
 ```json
 {
@@ -242,7 +246,24 @@ JSON 格式，由 `serde` 序列化/反序列化。
 
 `pixels[y][x]`：`null` 为空，`[r, g, b]` 为有色像素。坐标相对于边界框原点。
 
+保存时通过 `bounding_box()` 计算最小包围矩形，仅序列化有内容的区域。
 加载时遍历二维数组，将非 null 像素插入 HashMap。
+
+### 存储格式
+
+| 格式 | 扩展名 | 存储方式 | 用途 |
+|------|--------|---------|------|
+| PTD | `.ptd` | JSON → gzip 压缩（紧凑序列化） | 默认格式，体积小 |
+| JSON | `.json` | JSON 纯文本（pretty-print） | 人工阅读、调试、外部工具处理 |
+| PNG | `.png` | RGBA 图像（空像素透明） | 图片导出/导入 |
+
+格式选择由文件扩展名决定，`save` / `load` 根据扩展名自动切换处理逻辑。
+
+### PNG 导入/导出
+
+- **导出**（`export_png`）：`bounding_box()` 计算尺寸 → `ImageBuffer<Rgba<u8>>` → `img.save()`
+- **导入**（`import_png`）：`image::open()` → `to_rgba8()` → 遍历 `enumerate_pixels()`，alpha > 0 写入画布
+- 空画布导出为 1×1 透明 PNG
 
 ## Windows 平台注意事项
 
