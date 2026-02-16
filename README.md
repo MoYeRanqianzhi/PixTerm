@@ -104,7 +104,7 @@ cargo run --release
 | `crossterm` | 终端交互（raw mode、鼠标捕获、事件处理） |
 | `serde` / `serde_json` | JSON 序列化/反序列化 |
 | `flate2` | gzip 压缩/解压（.ptd 格式） |
-| `image` | PNG 图片读写（导入/导出） |
+| `png` | PNG 图片编解码（导入/导出） |
 
 ## 开发文档
 
