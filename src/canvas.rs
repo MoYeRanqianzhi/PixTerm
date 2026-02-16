@@ -63,12 +63,8 @@ impl Canvas {
         Some((min_x, min_y, max_x, max_y))
     }
 
-    /// 获取内部像素 HashMap 的引用（供 file 模块序列化使用）
-    pub fn pixels(&self) -> &HashMap<(u16, u16), Rgb> {
-        &self.pixels
-    }
-
     /// 画布是否为空（没有任何像素）
+    #[cfg(test)]
     pub fn is_empty(&self) -> bool {
         self.pixels.is_empty()
     }

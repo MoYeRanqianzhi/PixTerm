@@ -82,11 +82,13 @@ impl History {
     }
 
     /// 查询撤销栈是否为空
+    #[cfg(test)]
     pub fn can_undo(&self) -> bool {
         !self.undo_stack.is_empty()
     }
 
     /// 查询重做栈是否为空
+    #[cfg(test)]
     pub fn can_redo(&self) -> bool {
         !self.redo_stack.is_empty()
     }

@@ -24,6 +24,7 @@ pub fn parse_hex(input: &str) -> Option<Rgb> {
 }
 
 /// 将 RGB 颜色格式化为 Hex 字符串（如 `#FF00AA`）
+#[cfg(test)]
 pub fn rgb_to_hex(color: Rgb) -> String {
     format!("#{:02X}{:02X}{:02X}", color.0, color.1, color.2)
 }
@@ -43,15 +44,6 @@ pub fn default_palette() -> [Rgb; 10] {
         (255, 128, 0),    // 8: 橙色
         (128, 0, 255),    // 9: 紫色
     ]
-}
-
-/// 将 RGB 颜色转换为 crossterm 的 Color 类型，用于终端输出着色
-pub fn to_crossterm_color(color: Rgb) -> crossterm::style::Color {
-    crossterm::style::Color::Rgb {
-        r: color.0,
-        g: color.1,
-        b: color.2,
-    }
 }
 
 #[cfg(test)]
