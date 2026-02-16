@@ -149,9 +149,14 @@ jobs:
       # -------------------------------------------------------------------
       # 步骤 2：判断发布类型（正式版 vs 预发布）
       # -------------------------------------------------------------------
-      # 判断逻辑：
-      #   - 如果 github.ref 是 refs/tags/v* 或手动输入了 tag → 正式版
-      #   - 否则 → 预发布
+      # 判断逻辑（三级判断，确保无论哪种触发方式都能正确识别）：
+      #
+      #   1. github.ref 是 refs/tags/v*     → 正式版（tag 推送触发）
+      #   2. 手动输入了 tag                  → 正式版（workflow_dispatch 触发）
+      #   3. 当前 commit 上存在 v* tag       → 正式版（分支推送触发，但该
+      #      commit 已被打 tag，说明 tag 推送和分支推送几乎同时发生，
+      #      此时应走正式版路径，避免同一 commit 产生重复的预发布）
+      #   4. 以上都不满足                   → 预发布（普通分支推送）
       #
       # 正式版命名示例：
       #   tag_name:         v0.1.0
@@ -169,24 +174,38 @@ jobs:
           INPUT_TAG="${{ github.event.inputs.tag }}"
           APP_VERSION="${{ steps.version.outputs.version }}"
 
+          # 情况 1 & 2：显式的 tag 推送或手动输入
           if [[ "${{ github.ref }}" == refs/tags/v* ]] || [[ -n "$INPUT_TAG" ]]; then
-            # === 正式版 ===
             TAG_NAME="${INPUT_TAG:-${{ github.ref_name }}}"
             echo "is_release=true"       >> "$GITHUB_OUTPUT"
             echo "tag_name=$TAG_NAME"    >> "$GITHUB_OUTPUT"
             echo "release_name=PixTerm ${TAG_NAME}" >> "$GITHUB_OUTPUT"
             echo "artifact_version=${APP_VERSION}" >> "$GITHUB_OUTPUT"
-            echo "::notice::Release type: OFFICIAL — Tag: $TAG_NAME"
+            echo "::notice::Release type: OFFICIAL (tag/manual) — Tag: $TAG_NAME"
           else
-            # === 预发布 ===
-            TIMESTAMP=$(TZ='UTC' date +%Y%m%d%H%M%S)
-            SHORT_SHA=$(echo "${{ github.sha }}" | cut -c1-7)
-            echo "is_release=false"      >> "$GITHUB_OUTPUT"
-            echo "tag_name=build-${TIMESTAMP}-${SHORT_SHA}" >> "$GITHUB_OUTPUT"
-            echo "release_name=Pre-release ${APP_VERSION}+build.${TIMESTAMP}" >> "$GITHUB_OUTPUT"
-            echo "timestamp=$TIMESTAMP"  >> "$GITHUB_OUTPUT"
-            echo "artifact_version=${APP_VERSION}+build.${TIMESTAMP}" >> "$GITHUB_OUTPUT"
-            echo "::notice::Release type: PRE-RELEASE — Branch: ${{ github.ref_name }}, SHA: ${SHORT_SHA}"
+            # 情况 3：分支推送触发，但检查当前 commit 是否已有 v* tag
+            # 当 tag 推送和分支推送几乎同时到达 GitHub 时，tag 推送的工作流
+            # 可能因竞争而未被触发；此时分支推送的工作流应兜底识别为正式版
+            COMMIT_TAG=$(git tag -l 'v*' --points-at HEAD | head -n1)
+
+            if [[ -n "$COMMIT_TAG" ]]; then
+              # 当前 commit 上有 v* tag → 走正式版路径
+              echo "is_release=true"       >> "$GITHUB_OUTPUT"
+              echo "tag_name=$COMMIT_TAG"  >> "$GITHUB_OUTPUT"
+              echo "release_name=PixTerm ${COMMIT_TAG}" >> "$GITHUB_OUTPUT"
+              echo "artifact_version=${APP_VERSION}" >> "$GITHUB_OUTPUT"
+              echo "::notice::Release type: OFFICIAL (tag detected on commit) — Tag: $COMMIT_TAG"
+            else
+              # 情况 4：普通分支推送 → 预发布
+              TIMESTAMP=$(TZ='UTC' date +%Y%m%d%H%M%S)
+              SHORT_SHA=$(echo "${{ github.sha }}" | cut -c1-7)
+              echo "is_release=false"      >> "$GITHUB_OUTPUT"
+              echo "tag_name=build-${TIMESTAMP}-${SHORT_SHA}" >> "$GITHUB_OUTPUT"
+              echo "release_name=Pre-release ${APP_VERSION}+build.${TIMESTAMP}" >> "$GITHUB_OUTPUT"
+              echo "timestamp=$TIMESTAMP"  >> "$GITHUB_OUTPUT"
+              echo "artifact_version=${APP_VERSION}+build.${TIMESTAMP}" >> "$GITHUB_OUTPUT"
+              echo "::notice::Release type: PRE-RELEASE — Branch: ${{ github.ref_name }}, SHA: ${SHORT_SHA}"
+            fi
           fi
 
       # -------------------------------------------------------------------
@@ -214,11 +233,19 @@ jobs:
         run: |
           INPUT_TAG="${{ github.event.inputs.tag }}"
           IS_TAG_BUILD=false
+          CURRENT_TAG=""
 
-          # 判断当前构建是否基于 tag
+          # 判断当前构建是否基于 tag（三种方式：tag 推送、手动输入、commit 上有 tag）
           if [[ "${{ github.ref }}" == refs/tags/v* ]] || [[ -n "$INPUT_TAG" ]]; then
             IS_TAG_BUILD=true
             CURRENT_TAG="${INPUT_TAG:-${{ github.ref_name }}}"
+          else
+            # 检查当前 commit 是否已有 v* tag（兜底逻辑，与 release_type 步骤一致）
+            COMMIT_TAG=$(git tag -l 'v*' --points-at HEAD | head -n1)
+            if [[ -n "$COMMIT_TAG" ]]; then
+              IS_TAG_BUILD=true
+              CURRENT_TAG="$COMMIT_TAG"
+            fi
           fi
 
           # 查找上一个 tag 作为变更日志的起点
