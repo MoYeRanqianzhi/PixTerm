@@ -1,77 +1,76 @@
 // PixTerm - Canvas 模块
-// 画布数据结构：二维像素网格
+// 画布数据结构：基于 HashMap 的无限大小稀疏像素网格
 
 use crate::color::Rgb;
+use std::collections::HashMap;
 
-/// 画布数据结构
-/// 存储二维像素网格，每个像素为可选的 RGB 颜色
-/// `None` 表示该像素为空（透明/默认背景色）
+/// 无限大小画布数据结构
+/// 使用 HashMap 稀疏存储，仅记录有颜色的像素，无边界限制
 pub struct Canvas {
-    /// 画布宽度（像素列数）
-    pub width: u16,
-    /// 画布高度（像素行数）
-    pub height: u16,
-    /// 二维像素网格：pixels[y][x]，`None` 表示空像素
-    pub pixels: Vec<Vec<Option<Rgb>>>,
+    /// 稀疏像素存储：键为 (x, y) 坐标，值为 RGB 颜色
+    /// 不存在的键即为空像素
+    pixels: HashMap<(u16, u16), Rgb>,
 }
 
 impl Canvas {
-    /// 创建指定尺寸的空白画布
-    /// 所有像素初始化为 `None`（空/透明）
-    pub fn new(width: u16, height: u16) -> Self {
-        // 构建 height 行 x width 列的二维向量，全部填充 None
-        let pixels = vec![vec![None; width as usize]; height as usize];
+    /// 创建空白画布（无大小限制）
+    pub fn new() -> Self {
         Self {
-            width,
-            height,
-            pixels,
+            pixels: HashMap::new(),
         }
     }
 
     /// 获取指定坐标处的像素颜色
-    /// 如果坐标越界则返回 `None`
+    /// 返回 `Some(color)` 或 `None`（空像素）
     pub fn get_pixel(&self, x: u16, y: u16) -> Option<Rgb> {
-        // 边界检查：坐标必须在画布范围内
-        if x >= self.width || y >= self.height {
-            return None;
-        }
-        // 返回该位置的像素值（可能是 None 或 Some(color)）
-        self.pixels[y as usize][x as usize]
+        self.pixels.get(&(x, y)).copied()
     }
 
     /// 设置指定坐标处的像素颜色
-    /// `color` 为 `None` 时表示清除该像素（橡皮擦效果）
-    /// 如果坐标越界则不执行任何操作
+    /// `Some(color)` 绘制颜色，`None` 清除像素（橡皮擦）
     pub fn set_pixel(&mut self, x: u16, y: u16, color: Option<Rgb>) {
-        // 边界检查：坐标必须在画布范围内
-        if x < self.width && y < self.height {
-            self.pixels[y as usize][x as usize] = color;
-        }
-    }
-
-    /// 调整画布尺寸
-    /// 缩小时裁剪超出部分，扩大时新像素填充 `None`
-    pub fn resize(&mut self, new_width: u16, new_height: u16) {
-        // 调整每一行的列数
-        for row in &mut self.pixels {
-            row.resize(new_width as usize, None);
-        }
-        // 如果新高度更大，添加新行（全部为 None）
-        // 如果新高度更小，截断多余行
-        self.pixels
-            .resize(new_height as usize, vec![None; new_width as usize]);
-        // 更新尺寸字段
-        self.width = new_width;
-        self.height = new_height;
-    }
-
-    /// 清空画布：将所有像素重置为 `None`
-    pub fn clear(&mut self) {
-        for row in &mut self.pixels {
-            for pixel in row.iter_mut() {
-                *pixel = None;
+        match color {
+            Some(c) => {
+                self.pixels.insert((x, y), c);
+            }
+            None => {
+                self.pixels.remove(&(x, y));
             }
         }
+    }
+
+    /// 清空画布：移除所有像素
+    pub fn clear(&mut self) {
+        self.pixels.clear();
+    }
+
+    /// 计算所有像素的边界框
+    /// 返回 `Some((min_x, min_y, max_x, max_y))`，画布为空时返回 `None`
+    pub fn bounding_box(&self) -> Option<(u16, u16, u16, u16)> {
+        if self.pixels.is_empty() {
+            return None;
+        }
+        let mut min_x = u16::MAX;
+        let mut min_y = u16::MAX;
+        let mut max_x = 0u16;
+        let mut max_y = 0u16;
+        for &(x, y) in self.pixels.keys() {
+            min_x = min_x.min(x);
+            min_y = min_y.min(y);
+            max_x = max_x.max(x);
+            max_y = max_y.max(y);
+        }
+        Some((min_x, min_y, max_x, max_y))
+    }
+
+    /// 获取内部像素 HashMap 的引用（供 file 模块序列化使用）
+    pub fn pixels(&self) -> &HashMap<(u16, u16), Rgb> {
+        &self.pixels
+    }
+
+    /// 画布是否为空（没有任何像素）
+    pub fn is_empty(&self) -> bool {
+        self.pixels.is_empty()
     }
 }
 
@@ -81,57 +80,55 @@ mod tests {
 
     #[test]
     fn test_new_canvas() {
-        let canvas = Canvas::new(16, 8);
-        assert_eq!(canvas.width, 16);
-        assert_eq!(canvas.height, 8);
-        // 所有像素应为 None
+        let canvas = Canvas::new();
+        // 空画布任意坐标返回 None
         assert_eq!(canvas.get_pixel(0, 0), None);
-        assert_eq!(canvas.get_pixel(15, 7), None);
+        assert_eq!(canvas.get_pixel(1000, 1000), None);
+        assert!(canvas.is_empty());
     }
 
     #[test]
     fn test_set_get_pixel() {
-        let mut canvas = Canvas::new(10, 10);
+        let mut canvas = Canvas::new();
         // 设置一个像素
         canvas.set_pixel(5, 3, Some((255, 0, 0)));
         assert_eq!(canvas.get_pixel(5, 3), Some((255, 0, 0)));
+        assert!(!canvas.is_empty());
         // 清除像素
         canvas.set_pixel(5, 3, None);
         assert_eq!(canvas.get_pixel(5, 3), None);
+        assert!(canvas.is_empty());
     }
 
     #[test]
-    fn test_out_of_bounds() {
-        let mut canvas = Canvas::new(10, 10);
-        // 越界读取应返回 None
-        assert_eq!(canvas.get_pixel(10, 0), None);
-        assert_eq!(canvas.get_pixel(0, 10), None);
-        // 越界写入不应 panic
-        canvas.set_pixel(10, 10, Some((255, 0, 0)));
+    fn test_infinite_coords() {
+        let mut canvas = Canvas::new();
+        // 可以在任意 u16 坐标绘制
+        canvas.set_pixel(0, 0, Some((255, 0, 0)));
+        canvas.set_pixel(10000, 20000, Some((0, 255, 0)));
+        canvas.set_pixel(u16::MAX, u16::MAX, Some((0, 0, 255)));
+        assert_eq!(canvas.get_pixel(0, 0), Some((255, 0, 0)));
+        assert_eq!(canvas.get_pixel(10000, 20000), Some((0, 255, 0)));
+        assert_eq!(canvas.get_pixel(u16::MAX, u16::MAX), Some((0, 0, 255)));
     }
 
     #[test]
-    fn test_resize() {
-        let mut canvas = Canvas::new(4, 4);
-        canvas.set_pixel(1, 1, Some((0, 255, 0)));
-        // 扩大画布
-        canvas.resize(8, 8);
-        assert_eq!(canvas.width, 8);
-        assert_eq!(canvas.height, 8);
-        // 原有像素保留
-        assert_eq!(canvas.get_pixel(1, 1), Some((0, 255, 0)));
-        // 新区域为 None
-        assert_eq!(canvas.get_pixel(7, 7), None);
+    fn test_bounding_box() {
+        let mut canvas = Canvas::new();
+        assert_eq!(canvas.bounding_box(), None);
+        canvas.set_pixel(5, 10, Some((255, 0, 0)));
+        canvas.set_pixel(20, 3, Some((0, 255, 0)));
+        assert_eq!(canvas.bounding_box(), Some((5, 3, 20, 10)));
     }
 
     #[test]
     fn test_clear() {
-        let mut canvas = Canvas::new(4, 4);
+        let mut canvas = Canvas::new();
         canvas.set_pixel(0, 0, Some((255, 0, 0)));
         canvas.set_pixel(3, 3, Some((0, 255, 0)));
         canvas.clear();
-        // 清空后所有像素为 None
         assert_eq!(canvas.get_pixel(0, 0), None);
         assert_eq!(canvas.get_pixel(3, 3), None);
+        assert!(canvas.is_empty());
     }
 }

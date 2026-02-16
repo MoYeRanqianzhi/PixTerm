@@ -9,3 +9,8 @@ target/
 # IDE / 编辑器
 .idea/
 .vscode/
+
+
+# Added by cargo
+
+/target

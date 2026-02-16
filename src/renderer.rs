@@ -99,7 +99,7 @@ pub fn render_frame(
 
 /// 渲染画布区域
 /// 遍历终端可见区域的每一行，计算对应的画布坐标并输出像素颜色
-/// 空像素和画布外区域均使用终端默认背景（不着色）
+/// 无限画布：无边界限制，仅检查像素是否存在
 fn render_canvas_area(
     stdout: &mut io::Stdout,
     canvas: &Canvas,
@@ -116,9 +116,6 @@ fn render_canvas_area(
         // 当前终端行对应的画布 Y 坐标（固定 1 行 = 1 逻辑像素）
         let canvas_y = term_row as i32 + viewport_y;
 
-        // 判断该行是否在画布 Y 范围内
-        let y_in_bounds = canvas_y >= 0 && canvas_y < canvas.height as i32;
-
         // 逐列渲染，每次跳 PIXEL_WIDTH 列（一个逻辑像素宽度）
         let mut col = 0i32;
         while col < term_width as i32 {
@@ -129,33 +126,30 @@ fn render_canvas_area(
             let pixel_end_col = (canvas_x + 1) * PIXEL_WIDTH - viewport_x;
             let fill = (pixel_end_col - col).min(term_width as i32 - col).max(1) as usize;
 
-            // 判断是否在画布范围内且有颜色
-            let in_bounds = y_in_bounds
-                && canvas_x >= 0
-                && canvas_x < canvas.width as i32;
-
-            if in_bounds {
-                if let Some(rgb) = canvas.get_pixel(canvas_x as u16, canvas_y as u16) {
-                    // 有颜色的像素：设置背景色
-                    crossterm::queue!(
-                        stdout,
-                        style::SetBackgroundColor(style::Color::Rgb {
-                            r: rgb.0,
-                            g: rgb.1,
-                            b: rgb.2,
-                        }),
-                        style::Print(" ".repeat(fill)),
-                    )?;
-                } else {
-                    // 空像素：使用终端默认背景
-                    crossterm::queue!(
-                        stdout,
-                        style::ResetColor,
-                        style::Print(" ".repeat(fill)),
-                    )?;
-                }
+            // 无限画布：只要坐标非负且在 u16 范围内，就尝试获取像素
+            let pixel = if canvas_x >= 0
+                && canvas_y >= 0
+                && canvas_x <= u16::MAX as i32
+                && canvas_y <= u16::MAX as i32
+            {
+                canvas.get_pixel(canvas_x as u16, canvas_y as u16)
             } else {
-                // 画布外区域：使用终端默认背景
+                None
+            };
+
+            if let Some(rgb) = pixel {
+                // 有颜色的像素：设置背景色
+                crossterm::queue!(
+                    stdout,
+                    style::SetBackgroundColor(style::Color::Rgb {
+                        r: rgb.0,
+                        g: rgb.1,
+                        b: rgb.2,
+                    }),
+                    style::Print(" ".repeat(fill)),
+                )?;
+            } else {
+                // 空像素：使用终端默认背景（无颜色）
                 crossterm::queue!(
                     stdout,
                     style::ResetColor,

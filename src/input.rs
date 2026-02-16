@@ -74,7 +74,7 @@ fn handle_draw_mode_key(app: &mut App, key: KeyEvent) {
                 index, app.brush_color.0, app.brush_color.1, app.brush_color.2
             );
         }
-        // 方向键 — 移动键盘光标（同时滚动视口使光标可见）
+        // 方向键 — 移动键盘光标（无限画布，仅受 u16 上限限制）
         KeyCode::Up => {
             if app.cursor_y > 0 {
                 app.cursor_y -= 1;
@@ -82,7 +82,8 @@ fn handle_draw_mode_key(app: &mut App, key: KeyEvent) {
             app.ensure_cursor_visible();
         }
         KeyCode::Down => {
-            if app.cursor_y < app.canvas.height - 1 {
+            // 无限画布：光标可以向下移动到 u16::MAX
+            if app.cursor_y < u16::MAX {
                 app.cursor_y += 1;
             }
             app.ensure_cursor_visible();
@@ -94,7 +95,8 @@ fn handle_draw_mode_key(app: &mut App, key: KeyEvent) {
             app.ensure_cursor_visible();
         }
         KeyCode::Right => {
-            if app.cursor_x < app.canvas.width - 1 {
+            // 无限画布：光标可以向右移动到 u16::MAX
+            if app.cursor_x < u16::MAX {
                 app.cursor_x += 1;
             }
             app.ensure_cursor_visible();

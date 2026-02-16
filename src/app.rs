@@ -31,7 +31,7 @@ pub enum AppMode {
 /// 应用核心状态结构体
 /// 持有画布、历史管理器、UI 状态等所有运行时数据
 pub struct App {
-    /// 画布数据
+    /// 画布数据（无限大小，基于 HashMap 稀疏存储）
     pub canvas: Canvas,
     /// 撤销/重做历史管理器
     pub history: History,
@@ -66,12 +66,11 @@ pub struct App {
 }
 
 impl App {
-    /// 创建新的应用实例
-    /// `width`, `height` - 画布初始尺寸
-    pub fn new(width: u16, height: u16) -> Self {
+    /// 创建新的应用实例（无限画布，无需指定尺寸）
+    pub fn new() -> Self {
         let palette = color::default_palette();
         Self {
-            canvas: Canvas::new(width, height),
+            canvas: Canvas::new(),
             history: History::new(),
             mode: AppMode::Draw,
             // 默认画笔颜色为调色板第一个颜色（黑色）
@@ -138,11 +137,10 @@ impl App {
     }
 
     /// 在画布上绘制单个像素（独立操作，立即推入历史栈）
+    /// 无限画布：任意 u16 坐标均合法，无边界检查
     pub fn paint_pixel(&mut self, x: u16, y: u16, color: Option<Rgb>) {
-        if x >= self.canvas.width || y >= self.canvas.height {
-            return;
-        }
         let old_color = self.canvas.get_pixel(x, y);
+        // 颜色未变则跳过（避免产生无意义的历史记录）
         if old_color == color {
             return;
         }
@@ -157,11 +155,10 @@ impl App {
     }
 
     /// 在拖拽笔画中绘制单个像素（累积到 current_stroke，不立即入栈）
+    /// 无限画布：任意 u16 坐标均合法，无边界检查
     pub fn paint_pixel_stroke(&mut self, x: u16, y: u16, color: Option<Rgb>) {
-        if x >= self.canvas.width || y >= self.canvas.height {
-            return;
-        }
         let old_color = self.canvas.get_pixel(x, y);
+        // 颜色未变则跳过
         if old_color == color {
             return;
         }
@@ -299,7 +296,8 @@ impl App {
     }
 
     /// 将终端屏幕坐标转换为画布逻辑坐标
-    /// 返回 `None` 如果坐标在画布外或在状态栏区域
+    /// 无限画布：只要坐标非负且可表示为 u16 即有效
+    /// 返回 `None` 如果坐标为负数或在状态栏区域
     pub fn screen_to_canvas(&self, col: u16, row: u16) -> Option<(u16, u16)> {
         let (_, term_height) = crossterm::terminal::size().ok()?;
         let canvas_area_height = term_height.saturating_sub(renderer::STATUS_BAR_HEIGHT);
@@ -313,6 +311,7 @@ impl App {
         let canvas_x_raw = col as i32 + self.viewport_x;
         let canvas_y_raw = row as i32 + self.viewport_y;
 
+        // 负坐标无效（u16 不能表示负数）
         if canvas_x_raw < 0 || canvas_y_raw < 0 {
             return None;
         }
@@ -320,7 +319,8 @@ impl App {
         let canvas_x = canvas_x_raw / PIXEL_WIDTH;
         let canvas_y = canvas_y_raw / PIXEL_HEIGHT;
 
-        if canvas_x < self.canvas.width as i32 && canvas_y < self.canvas.height as i32 {
+        // 确保坐标在 u16 范围内（无限画布无上界限制，仅受 u16::MAX 限制）
+        if canvas_x <= u16::MAX as i32 && canvas_y <= u16::MAX as i32 {
             Some((canvas_x as u16, canvas_y as u16))
         } else {
             None

@@ -53,11 +53,11 @@ fn run_app() -> io::Result<()> {
     // 1. 启用 raw mode（禁用行缓冲和回显，直接接收按键事件）
     terminal::enable_raw_mode()?;
     // 2. 进入备用屏幕（保留原始终端内容）
-    // 3. 启用鼠标捕获（接收鼠标点击、拖拽、滚轮事件）
+    // 3. 启用鼠标捕获（接收鼠标点击、拖拽事件）
     execute!(stdout, EnterAlternateScreen, EnableMouseCapture)?;
 
-    // 创建应用实例（默认 32x32 画布）
-    let mut app = app::App::new(32, 32);
+    // 创建应用实例（无限画布，无需指定尺寸）
+    let mut app = app::App::new();
 
     // 运行应用主循环
     let result = app.run();

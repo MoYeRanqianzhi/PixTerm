@@ -50,11 +50,14 @@ pub fn render_status_bar(
     )?;
 
     // 画笔信息：画笔x [颜色块]
-    // "x" 为当前调色板索引号，颜色块用两个空格背景着色表示
+    // "x" 为当前调色板索引号，颜色块用两个空格背景着色表示，外加方括号标记
     crossterm::queue!(
         stdout,
         style::SetForegroundColor(style::Color::White),
         style::Print(format!(" 画笔{active_palette_index} ")),
+        // 左方括号
+        style::SetForegroundColor(style::Color::Grey),
+        style::Print("["),
         // 颜色块：两个空格宽度，背景色为画笔颜色
         style::SetBackgroundColor(style::Color::Rgb {
             r: brush_color.0,
@@ -62,7 +65,10 @@ pub fn render_status_bar(
             b: brush_color.2,
         }),
         style::Print("  "),
+        // 右方括号
         style::SetBackgroundColor(style::Color::Rgb { r: 40, g: 40, b: 40 }),
+        style::SetForegroundColor(style::Color::Grey),
+        style::Print("]"),
     )?;
 
     // 调色板色块：显示 0-9 数字键对应的颜色
