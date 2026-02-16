@@ -14,5 +14,17 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 # gzip 压缩/解压：用于 .ptd 压缩存储格式
 flate2 = "1.1"
-# 图像处理：PNG 导入/导出
-image = { version = "0.25", default-features = false, features = ["png"] }
+# PNG 编解码：导入/导出 PNG 图片（直接使用 png crate 替代 image crate 以减少依赖）
+png = "0.18"
+
+[profile.release]
+# 最高优化等级（默认值，显式声明确保不被意外覆盖）
+opt-level = 3
+# Fat LTO：跨所有 crate 的全链接时优化，生成更快更小的二进制
+lto = "fat"
+# 单 codegen unit：牺牲并行编译，允许 LLVM 全局优化（内联、死代码消除）
+codegen-units = 1
+# panic 时直接终止进程：移除 unwind 表和 landing pad，减小二进制体积
+panic = "abort"
+# 剥离调试符号和符号表
+strip = true

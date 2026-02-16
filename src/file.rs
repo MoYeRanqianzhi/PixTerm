@@ -7,7 +7,6 @@ use crate::color::Rgb;
 use flate2::read::GzDecoder;
 use flate2::write::GzEncoder;
 use flate2::Compression;
-use image::{ImageBuffer, Rgba};
 use serde::{Deserialize, Serialize};
 use std::fs;
 use std::io::{self, Read as _, Write as _};
@@ -169,45 +168,102 @@ pub fn export_png(canvas: &Canvas, path: &Path) -> io::Result<()> {
         }
     };
 
-    // 创建 RGBA 图像缓冲区
-    let img = ImageBuffer::<Rgba<u8>, Vec<u8>>::from_fn(width, height, |x, y| {
-        // 将图像像素坐标转换回画布绝对坐标
-        let canvas_x = min_x + x as u16;
-        let canvas_y = min_y + y as u16;
-        match canvas.get_pixel(canvas_x, canvas_y) {
-            // 有色像素：不透明 (alpha = 255)
-            Some((r, g, b)) => Rgba([r, g, b, 255]),
-            // 空像素：完全透明 (alpha = 0)
-            None => Rgba([0, 0, 0, 0]),
+    // 构建 RGBA 像素缓冲区（row-major 排列，每像素 4 字节）
+    // 初始值全部为 0（即 [0,0,0,0] = 完全透明），有色像素后续覆写
+    let mut rgba_data = vec![0u8; (width * height * 4) as usize];
+    for y in 0..height {
+        for x in 0..width {
+            // 将图像像素坐标转换回画布绝对坐标
+            let canvas_x = min_x + x as u16;
+            let canvas_y = min_y + y as u16;
+            let offset = ((y * width + x) * 4) as usize;
+            if let Some((r, g, b)) = canvas.get_pixel(canvas_x, canvas_y) {
+                // 有色像素：不透明 (alpha = 255)
+                rgba_data[offset] = r;
+                rgba_data[offset + 1] = g;
+                rgba_data[offset + 2] = b;
+                rgba_data[offset + 3] = 255;
+            }
+            // 空像素：保持初始值 [0,0,0,0]（完全透明）
         }
-    });
+    }
 
-    // 保存为 PNG 文件
-    img.save(path)
+    // 创建 PNG 编码器，配置为 RGBA 8-bit 颜色模式
+    let file = fs::File::create(path)?;
+    let buf_writer = io::BufWriter::new(file);
+    let mut encoder = png::Encoder::new(buf_writer, width, height);
+    encoder.set_color(png::ColorType::Rgba);
+    encoder.set_depth(png::BitDepth::Eight);
+
+    // 写入 PNG 头部和图像数据
+    let mut writer = encoder
+        .write_header()
+        .map_err(|e| io::Error::new(io::ErrorKind::Other, e))?;
+    writer
+        .write_image_data(&rgba_data)
         .map_err(|e| io::Error::new(io::ErrorKind::Other, e))?;
 
     Ok(())
 }
 
 /// 从 PNG 图片导入像素数据到新画布
-/// 读取图像的每个像素，alpha > 0 的像素写入画布
+/// 支持所有常见颜色类型：Grayscale / GrayscaleAlpha / RGB / RGBA
+/// 索引色和低位深通过 png 解码器的 EXPAND 变换自动转换为 8-bit RGB(A)
+/// alpha > 0 的像素写入画布，alpha = 0 的像素跳过
 ///
 /// `path` - 输入 PNG 文件路径
 /// 返回 `io::Result<Canvas>`，图像读取失败时返回错误
 pub fn import_png(path: &Path) -> io::Result<Canvas> {
-    // 打开图像文件并转换为 RGBA8 格式
-    let img = image::open(path)
-        .map_err(|e| io::Error::new(io::ErrorKind::Other, e))?
-        .to_rgba8();
+    // 打开 PNG 文件并配置解码器
+    let file = fs::File::open(path)?;
+    let mut decoder = png::Decoder::new(io::BufReader::new(file));
+    // EXPAND：索引色 → RGB(A)，低位深灰度 → 8-bit，tRNS 块 → alpha 通道
+    // STRIP_16：16-bit 通道 → 8-bit 通道
+    // 经过这两个变换后，输出必定为 8-bit 的 Grayscale/GrayscaleAlpha/Rgb/Rgba
+    decoder.set_transformations(png::Transformations::EXPAND | png::Transformations::STRIP_16);
+
+    // 读取图像信息并分配输出缓冲区
+    let mut reader = decoder
+        .read_info()
+        .map_err(|e| io::Error::new(io::ErrorKind::Other, e))?;
+    let mut buf = vec![0u8; reader.output_buffer_size().unwrap()];
+
+    // 解码第一帧图像数据到缓冲区
+    let info = reader
+        .next_frame(&mut buf)
+        .map_err(|e| io::Error::new(io::ErrorKind::Other, e))?;
+
+    let width = info.width;
+    let height = info.height;
+    let color_type = info.color_type;
+    // 每像素的通道数（Grayscale=1, GrayscaleAlpha=2, Rgb=3, Rgba=4）
+    let samples = color_type.samples() as u32;
 
     let mut canvas = Canvas::new();
 
-    // 遍历所有像素，将 alpha > 0 的像素写入画布
-    for (x, y, pixel) in img.enumerate_pixels() {
-        let Rgba([r, g, b, a]) = *pixel;
-        if a > 0 {
-            // 图像坐标直接映射为画布坐标（u16 范围限制）
-            if x <= u16::MAX as u32 && y <= u16::MAX as u32 {
+    // 遍历所有像素，根据颜色类型解析 RGBA 分量
+    for y in 0..height {
+        for x in 0..width {
+            let idx = ((y * width + x) * samples) as usize;
+            // 根据颜色类型解析为 (r, g, b, a) 四元组
+            let (r, g, b, a) = match color_type {
+                // 灰度：单通道映射到 RGB 三通道，全不透明
+                png::ColorType::Grayscale => (buf[idx], buf[idx], buf[idx], 255u8),
+                // 灰度+透明度：灰度映射到 RGB，保留 alpha
+                png::ColorType::GrayscaleAlpha => {
+                    (buf[idx], buf[idx], buf[idx], buf[idx + 1])
+                }
+                // RGB：三通道，全不透明
+                png::ColorType::Rgb => (buf[idx], buf[idx + 1], buf[idx + 2], 255u8),
+                // RGBA：四通道，保留 alpha
+                png::ColorType::Rgba => {
+                    (buf[idx], buf[idx + 1], buf[idx + 2], buf[idx + 3])
+                }
+                // 索引色已被 EXPAND 变换转换，不应出现此分支
+                _ => continue,
+            };
+            // alpha > 0 的像素写入画布（u16 坐标范围限制）
+            if a > 0 && x <= u16::MAX as u32 && y <= u16::MAX as u32 {
                 canvas.set_pixel(x as u16, y as u16, Some((r, g, b)));
             }
         }
