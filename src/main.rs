@@ -46,7 +46,6 @@ fn main() {
 
 /// 初始化终端环境 → 运行应用 → 恢复终端环境
 fn run_app() -> io::Result<()> {
-    // 获取标准输出句柄
     let mut stdout = io::stdout();
 
     // 初始化终端：
@@ -54,9 +53,12 @@ fn run_app() -> io::Result<()> {
     terminal::enable_raw_mode()?;
     // 2. 进入备用屏幕（保留原始终端内容）
     // 3. 启用鼠标捕获（接收鼠标点击、拖拽事件）
+    //    注：Windows Terminal 会在终端层面拦截 Ctrl+滚轮用于字体缩放，
+    //    EnableMouseCapture 不会阻止此功能。缩放需使用 Windows Terminal
+    //    （旧版 ConHost 不支持 Ctrl+滚轮缩放）。
     execute!(stdout, EnterAlternateScreen, EnableMouseCapture)?;
 
-    // 创建应用实例（无限画布，无需指定尺寸）
+    // 创建应用实例（无限画布）
     let mut app = app::App::new();
 
     // 运行应用主循环
@@ -72,13 +74,9 @@ fn run_app() -> io::Result<()> {
 /// 禁用鼠标捕获 → 离开备用屏幕 → 禁用 raw mode → 显示光标
 fn cleanup_terminal() -> io::Result<()> {
     let mut stdout = io::stdout();
-    // 禁用鼠标捕获
     execute!(stdout, DisableMouseCapture)?;
-    // 离开备用屏幕（恢复原始终端内容）
     execute!(stdout, LeaveAlternateScreen)?;
-    // 禁用 raw mode（恢复正常的行缓冲和回显）
     terminal::disable_raw_mode()?;
-    // 显示光标（渲染时可能隐藏了光标）
     execute!(stdout, crossterm::cursor::Show)?;
     Ok(())
 }

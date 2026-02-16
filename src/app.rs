@@ -1,5 +1,6 @@
 // PixTerm - App 模块
 // 核心应用状态、事件循环、模式管理
+// 优化：BufWriter 缓冲输出 + 事件驱动渲染（仅在事件发生时重绘）
 
 use crate::canvas::Canvas;
 use crate::color::{self, Rgb};
@@ -10,7 +11,7 @@ use crate::input;
 use crate::renderer;
 use crate::ui::DisplayMode;
 use crossterm::event;
-use std::io;
+use std::io::{self, BufWriter, Write};
 use std::path::Path;
 use std::time::Duration;
 
@@ -63,6 +64,13 @@ pub struct App {
     pub is_drawing: bool,
     /// 当前拖拽笔画的临时历史记录（鼠标释放时整体推入历史栈）
     pub current_stroke: Vec<HistoryEntry>,
+    /// 是否显示键盘光标（首次使用方向键/空格后才激活，避免初始状态下左上角出现多余的 [] 标记）
+    pub show_cursor: bool,
+    /// 强制全屏重绘标记（键盘操作、窗口尺寸变化等需要整体刷新时设置）
+    pub force_full_redraw: bool,
+    /// 脏像素列表：记录自上次渲染以来发生变化的画布坐标
+    /// 用于增量渲染，鼠标拖拽绘制时仅更新变化的像素而非全屏重绘
+    pub dirty_pixels: Vec<(u16, u16)>,
 }
 
 impl App {
@@ -87,40 +95,81 @@ impl App {
             running: true,
             is_drawing: false,
             current_stroke: Vec::new(),
+            show_cursor: false,
+            force_full_redraw: false,
+            dirty_pixels: Vec::new(),
         }
     }
 
     /// 启动应用主事件循环
-    /// 循环执行：渲染 → 等待事件 → 处理事件
+    /// 优化策略：
+    /// 1. 使用 BufWriter 将整帧输出缓冲后一次性刷新，消除逐像素写入造成的画面撕裂
+    /// 2. 仅在接收到事件后才渲染，避免无变化时的无谓重绘
+    /// 3. 批量消费所有待处理事件后再渲染一次，减少拖拽绘制时的中间帧
+    /// 4. 基于 needs_redraw 标记过滤无视觉变化的事件（如鼠标移动），进一步减少重绘次数
+    /// 5. 两级渲染：全屏重绘（键盘/窗口事件）与增量渲染（鼠标绘制仅更新脏像素）
     pub fn run(&mut self) -> io::Result<()> {
-        let mut stdout = io::stdout();
+        // BufWriter 将所有 queue! 输出缓冲在内存中，flush 时一次性写入终端
+        // 64KB 缓冲区足够容纳一帧完整的终端输出（120×40 终端约需 10-30KB）
+        let stdout = io::stdout();
+        let mut writer = BufWriter::with_capacity(65536, stdout.lock());
 
-        // 初始渲染
-        self.render_to(&mut stdout)?;
+        // 初始渲染（显示空画布和状态栏）
+        self.render_to(&mut writer)?;
 
         // 主循环：持续运行直到 running 标记为 false
         while self.running {
-            // 等待事件（200ms 超时，用于定期刷新）
-            if event::poll(Duration::from_millis(200))? {
+            // 阻塞等待事件，超时 100ms（仅用于周期性检查退出条件）
+            if event::poll(Duration::from_millis(100))? {
+                // 处理第一个事件，记录是否需要重绘
                 let evt = event::read()?;
-                input::handle_event(self, evt);
+                let mut needs_redraw = input::handle_event(self, evt);
+
+                // 批量消费所有已就绪的事件，避免逐事件渲染
+                // poll(0ms) 为非阻塞检查：有事件则立即读取，无事件则跳出
+                while self.running && event::poll(Duration::from_millis(0))? {
+                    let evt = event::read()?;
+                    // 任何一个事件需要重绘则标记为 true（位或累积）
+                    needs_redraw |= input::handle_event(self, evt);
+                }
+
+                // 根据变化类型选择渲染策略
+                if needs_redraw {
+                    if self.force_full_redraw {
+                        // 全屏重绘：键盘操作、窗口尺寸变化、模式切换等
+                        // 需要刷新整个画面（画布 + 状态栏 + 命令行 + 光标）
+                        self.render_to(&mut writer)?;
+                        self.force_full_redraw = false;
+                        self.dirty_pixels.clear();
+                    } else if !self.dirty_pixels.is_empty() {
+                        // 增量渲染：鼠标拖拽绘制时仅更新发生变化的像素单元格
+                        // 避免全屏重绘带来的画面抖动，大幅提升绘制流畅度
+                        renderer::render_dirty_pixels(
+                            &mut writer,
+                            &self.canvas,
+                            &self.dirty_pixels,
+                            self.viewport_x,
+                            self.viewport_y,
+                        )?;
+                        self.dirty_pixels.clear();
+                    }
+                }
             }
-            // 每次循环都重新渲染
-            self.render_to(&mut stdout)?;
+            // 超时时不渲染——没有事件意味着没有变化
         }
 
         Ok(())
     }
 
-    /// 渲染当前帧到指定输出
-    fn render_to(&self, stdout: &mut io::Stdout) -> io::Result<()> {
+    /// 渲染当前帧到指定缓冲写入器
+    fn render_to(&self, w: &mut impl Write) -> io::Result<()> {
         let display_mode = match self.mode {
             AppMode::Draw => DisplayMode::Draw,
             AppMode::Command => DisplayMode::Command,
         };
 
         renderer::render_frame(
-            stdout,
+            w,
             &self.canvas,
             self.viewport_x,
             self.viewport_y,
@@ -133,6 +182,7 @@ impl App {
             &self.command_buffer,
             &self.status_message,
             self.show_help,
+            self.show_cursor,
         )
     }
 
@@ -155,6 +205,7 @@ impl App {
     }
 
     /// 在拖拽笔画中绘制单个像素（累积到 current_stroke，不立即入栈）
+    /// 同时将变化的坐标推入 dirty_pixels 以供增量渲染使用
     /// 无限画布：任意 u16 坐标均合法，无边界检查
     pub fn paint_pixel_stroke(&mut self, x: u16, y: u16, color: Option<Rgb>) {
         let old_color = self.canvas.get_pixel(x, y);
@@ -169,6 +220,8 @@ impl App {
             old_color,
             new_color: color,
         });
+        // 记录脏像素坐标，用于增量渲染（仅更新该像素而非全屏重绘）
+        self.dirty_pixels.push((x, y));
     }
 
     /// 结束鼠标拖拽笔画，将累积的修改作为一组操作推入历史栈
@@ -204,9 +257,10 @@ impl App {
         }
     }
 
-    /// 保存画布到 JSON 文件
+    /// 保存画布到文件
+    /// 默认使用 .ptd 压缩格式，也可通过指定文件名使用 .json 格式
     pub fn save_canvas(&mut self, filename: Option<&str>) {
-        let path_str = filename.unwrap_or("canvas.json");
+        let path_str = filename.unwrap_or("canvas.ptd");
         let path = Path::new(path_str);
         match file::save_canvas(&self.canvas, path) {
             Ok(()) => {
@@ -218,9 +272,10 @@ impl App {
         }
     }
 
-    /// 从 JSON 文件加载画布
+    /// 从文件加载画布
+    /// 默认使用 .ptd 压缩格式，也可通过指定文件名使用 .json 格式
     pub fn load_canvas(&mut self, filename: Option<&str>) {
-        let path_str = filename.unwrap_or("canvas.json");
+        let path_str = filename.unwrap_or("canvas.ptd");
         let path = Path::new(path_str);
         match file::load_canvas(path) {
             Ok(loaded) => {
@@ -232,6 +287,42 @@ impl App {
             }
             Err(e) => {
                 self.status_message = format!("加载失败: {e}");
+            }
+        }
+    }
+
+    /// 导出画布为 PNG 图片
+    /// `filename` - 可选文件名，默认 "canvas.png"
+    pub fn export_png(&mut self, filename: Option<&str>) {
+        let path_str = filename.unwrap_or("canvas.png");
+        let path = Path::new(path_str);
+        match file::export_png(&self.canvas, path) {
+            Ok(()) => {
+                self.status_message = format!("已导出到 {path_str}");
+            }
+            Err(e) => {
+                self.status_message = format!("导出失败: {e}");
+            }
+        }
+    }
+
+    /// 从 PNG 图片导入像素到画布
+    /// 导入后清空历史记录并重置光标位置
+    /// `filename` - PNG 文件名
+    pub fn import_png(&mut self, filename: &str) {
+        let path = Path::new(filename);
+        match file::import_png(path) {
+            Ok(loaded) => {
+                self.canvas = loaded;
+                self.history.clear();
+                self.cursor_x = 0;
+                self.cursor_y = 0;
+                self.viewport_x = 0;
+                self.viewport_y = 0;
+                self.status_message = format!("已导入 {filename}");
+            }
+            Err(e) => {
+                self.status_message = format!("导入失败: {e}");
             }
         }
     }
@@ -251,12 +342,47 @@ impl App {
             Some(Command::Quit) => {
                 self.running = false;
             }
-            Some(Command::Paint(x, y, color)) => {
-                self.paint_pixel(x, y, Some(color));
-                self.status_message = format!(
-                    "已在 ({x},{y}) 绘制 #{:02X}{:02X}{:02X}",
-                    color.0, color.1, color.2
-                );
+            Some(Command::Paint { x_range, y_range, color }) => {
+                // 使用指定颜色或当前画笔颜色
+                let paint_color = color.unwrap_or(self.brush_color);
+                let (x1, x2) = x_range;
+                let (y1, y2) = y_range;
+                // 收集所有实际发生变化的像素，作为一组操作推入历史栈
+                let mut entries = Vec::new();
+                for y in y1..=y2 {
+                    for x in x1..=x2 {
+                        let old_color = self.canvas.get_pixel(x, y);
+                        let new_color = Some(paint_color);
+                        // 跳过颜色未变的像素，避免产生无意义的历史记录
+                        if old_color != new_color {
+                            self.canvas.set_pixel(x, y, new_color);
+                            entries.push(HistoryEntry {
+                                x,
+                                y,
+                                old_color,
+                                new_color,
+                            });
+                        }
+                    }
+                }
+                if !entries.is_empty() {
+                    let count = entries.len();
+                    self.history.push_undo(entries);
+                    // 单像素和范围使用不同的状态消息格式
+                    if x1 == x2 && y1 == y2 {
+                        self.status_message = format!(
+                            "已在 ({x1},{y1}) 绘制 #{:02X}{:02X}{:02X}",
+                            paint_color.0, paint_color.1, paint_color.2
+                        );
+                    } else {
+                        self.status_message = format!(
+                            "已绘制 {count} 像素 ({x1}:{x2},{y1}:{y2}) #{:02X}{:02X}{:02X}",
+                            paint_color.0, paint_color.1, paint_color.2
+                        );
+                    }
+                } else {
+                    self.status_message = "无变化（目标区域已是相同颜色）".to_string();
+                }
             }
             Some(Command::Undo) => {
                 self.apply_undo();
@@ -289,6 +415,12 @@ impl App {
                     color.0, color.1, color.2
                 );
             }
+            Some(Command::Export(filename)) => {
+                self.export_png(filename.as_deref());
+            }
+            Some(Command::Import(filename)) => {
+                self.import_png(&filename);
+            }
             None => {
                 self.status_message = format!("未知命令: {input}");
             }
@@ -307,11 +439,11 @@ impl App {
             return None;
         }
 
-        // 终端坐标 → 画布逻辑坐标（固定 2 列 = 1 像素宽，1 行 = 1 像素高）
+        // 终端坐标 → 画布逻辑坐标
         let canvas_x_raw = col as i32 + self.viewport_x;
         let canvas_y_raw = row as i32 + self.viewport_y;
 
-        // 负坐标无效（u16 不能表示负数）
+        // 负坐标无效
         if canvas_x_raw < 0 || canvas_y_raw < 0 {
             return None;
         }
@@ -319,7 +451,7 @@ impl App {
         let canvas_x = canvas_x_raw / PIXEL_WIDTH;
         let canvas_y = canvas_y_raw / PIXEL_HEIGHT;
 
-        // 确保坐标在 u16 范围内（无限画布无上界限制，仅受 u16::MAX 限制）
+        // 确保在 u16 范围内
         if canvas_x <= u16::MAX as i32 && canvas_y <= u16::MAX as i32 {
             Some((canvas_x as u16, canvas_y as u16))
         } else {
@@ -339,7 +471,7 @@ impl App {
         let screen_col = self.cursor_x as i32 * PIXEL_WIDTH - self.viewport_x;
         let screen_row = self.cursor_y as i32 * PIXEL_HEIGHT - self.viewport_y;
 
-        // 水平方向
+        // 水平方向：光标超出左边界时向左滚动，超出右边界时向右滚动
         if screen_col < 0 {
             self.viewport_x = self.cursor_x as i32 * PIXEL_WIDTH;
         }

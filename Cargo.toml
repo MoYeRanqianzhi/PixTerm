@@ -12,3 +12,7 @@ crossterm = "0.28"
 serde = { version = "1", features = ["derive"] }
 # JSON 序列化/反序列化
 serde_json = "1"
+# gzip 压缩/解压：用于 .ptd 压缩存储格式
+flate2 = "1.1"
+# 图像处理：PNG 导入/导出
+image = { version = "0.25", default-features = false, features = ["png"] }

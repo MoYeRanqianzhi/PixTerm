@@ -2,36 +2,51 @@
 // 键盘/鼠标事件处理与分发
 
 use crate::app::App;
-use crossterm::event::{Event, KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEvent, MouseEventKind};
+use crossterm::event::{
+    Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers, MouseButton, MouseEvent, MouseEventKind,
+};
 
 /// 处理终端事件的顶层分发函数
 /// 根据当前应用模式（绘制/命令）将事件路由到对应的处理器
-pub fn handle_event(app: &mut App, event: Event) {
+/// 返回 `true` 表示画面需要重绘，`false` 表示无视觉变化可跳过渲染
+pub fn handle_event(app: &mut App, event: Event) -> bool {
     match event {
         // 键盘事件
         Event::Key(key_event) => {
+            // Windows 下 crossterm 会同时报告 Press/Release/Repeat 三种事件，
+            // 仅处理 Press 事件，否则每个按键会被执行两次（双倍字符）
+            if key_event.kind != KeyEventKind::Press {
+                return false;
+            }
+            // 键盘事件总是需要全屏重绘（状态栏、模式、光标位置等可能变化）
+            app.force_full_redraw = true;
             // 如果正在显示帮助，任意键关闭帮助
             if app.show_help {
                 app.show_help = false;
-                return;
+                return true;
             }
             match app.mode {
                 crate::app::AppMode::Draw => handle_draw_mode_key(app, key_event),
                 crate::app::AppMode::Command => handle_command_mode_key(app, key_event),
             }
+            // 所有通过 Press 过滤的键盘事件都会产生视觉变化
+            true
         }
         // 鼠标事件（仅绘制模式处理）
         Event::Mouse(mouse_event) => {
             // 帮助界面中忽略鼠标事件
             if app.show_help {
-                return;
+                return false;
             }
-            handle_mouse_event(app, mouse_event);
+            handle_mouse_event(app, mouse_event)
         }
-        // 终端大小变化事件：无需特殊处理，渲染时会自动获取新尺寸
-        Event::Resize(_, _) => {}
-        // 其他事件忽略
-        _ => {}
+        // 终端大小变化事件：需要全屏重绘以适应新尺寸
+        Event::Resize(_, _) => {
+            app.force_full_redraw = true;
+            true
+        }
+        // 其他事件忽略，无需重绘
+        _ => false,
     }
 }
 
@@ -62,7 +77,12 @@ fn handle_draw_mode_key(app: &mut App, key: KeyEvent) {
         }
         // 空格 — 在键盘光标位置绘制像素
         KeyCode::Char(' ') => {
+            app.show_cursor = true;
             app.paint_pixel(app.cursor_x, app.cursor_y, Some(app.brush_color));
+        }
+        // ` 反引号（ESC 下方按键）— 切换键盘光标显示/隐藏
+        KeyCode::Char('`') => {
+            app.show_cursor = !app.show_cursor;
         }
         // 数字键 0-9 — 切换调色板颜色
         KeyCode::Char(c @ '0'..='9') => {
@@ -75,27 +95,30 @@ fn handle_draw_mode_key(app: &mut App, key: KeyEvent) {
             );
         }
         // 方向键 — 移动键盘光标（无限画布，仅受 u16 上限限制）
+        // 首次按下方向键时激活光标显示
         KeyCode::Up => {
+            app.show_cursor = true;
             if app.cursor_y > 0 {
                 app.cursor_y -= 1;
             }
             app.ensure_cursor_visible();
         }
         KeyCode::Down => {
-            // 无限画布：光标可以向下移动到 u16::MAX
+            app.show_cursor = true;
             if app.cursor_y < u16::MAX {
                 app.cursor_y += 1;
             }
             app.ensure_cursor_visible();
         }
         KeyCode::Left => {
+            app.show_cursor = true;
             if app.cursor_x > 0 {
                 app.cursor_x -= 1;
             }
             app.ensure_cursor_visible();
         }
         KeyCode::Right => {
-            // 无限画布：光标可以向右移动到 u16::MAX
+            app.show_cursor = true;
             if app.cursor_x < u16::MAX {
                 app.cursor_x += 1;
             }
@@ -103,6 +126,7 @@ fn handle_draw_mode_key(app: &mut App, key: KeyEvent) {
         }
         // 删除键 — 清除光标处像素（橡皮擦）
         KeyCode::Delete => {
+            app.show_cursor = true;
             app.paint_pixel(app.cursor_x, app.cursor_y, None);
         }
         // 其他按键忽略
@@ -121,10 +145,8 @@ fn handle_command_mode_key(app: &mut App, key: KeyEvent) {
         }
         // Enter — 执行命令
         KeyCode::Enter => {
-            // 取出命令缓冲区内容并清空
             let input = app.command_buffer.clone();
             app.command_buffer.clear();
-            // 执行命令后回到绘制模式
             app.mode = crate::app::AppMode::Draw;
             app.execute_command(&input);
         }
@@ -145,17 +167,20 @@ fn handle_command_mode_key(app: &mut App, key: KeyEvent) {
 }
 
 /// 鼠标事件处理
-fn handle_mouse_event(app: &mut App, mouse: MouseEvent) {
+/// 返回 `true` 表示画面需要重绘（有像素变化或状态变化）
+/// 返回 `false` 表示无视觉变化（如鼠标单纯移动、点击在状态栏区域等）
+fn handle_mouse_event(app: &mut App, mouse: MouseEvent) -> bool {
     match mouse.kind {
         // 鼠标左键按下 — 开始绘制笔画
         MouseEventKind::Down(MouseButton::Left) => {
-            // 将终端坐标转换为画布逻辑坐标
             if let Some((cx, cy)) = app.screen_to_canvas(mouse.column, mouse.row) {
-                // 开始新的笔画
                 app.is_drawing = true;
                 app.current_stroke.clear();
-                // 绘制第一个像素
                 app.paint_pixel_stroke(cx, cy, Some(app.brush_color));
+                true
+            } else {
+                // 点击在状态栏或画布外，无视觉变化
+                false
             }
         }
         // 鼠标右键按下 — 橡皮擦（清除像素）
@@ -164,6 +189,9 @@ fn handle_mouse_event(app: &mut App, mouse: MouseEvent) {
                 app.is_drawing = true;
                 app.current_stroke.clear();
                 app.paint_pixel_stroke(cx, cy, None);
+                true
+            } else {
+                false
             }
         }
         // 鼠标拖拽 — 连续绘制
@@ -171,7 +199,12 @@ fn handle_mouse_event(app: &mut App, mouse: MouseEvent) {
             if app.is_drawing {
                 if let Some((cx, cy)) = app.screen_to_canvas(mouse.column, mouse.row) {
                     app.paint_pixel_stroke(cx, cy, Some(app.brush_color));
+                    true
+                } else {
+                    false
                 }
+            } else {
+                false
             }
         }
         // 鼠标右键拖拽 — 连续擦除
@@ -179,16 +212,27 @@ fn handle_mouse_event(app: &mut App, mouse: MouseEvent) {
             if app.is_drawing {
                 if let Some((cx, cy)) = app.screen_to_canvas(mouse.column, mouse.row) {
                     app.paint_pixel_stroke(cx, cy, None);
+                    true
+                } else {
+                    false
                 }
+            } else {
+                false
             }
         }
         // 鼠标释放 — 结束笔画，将笔画记录推入历史
         MouseEventKind::Up(_) => {
             if app.is_drawing {
                 app.finish_stroke();
+                // 笔画结束，但画布内容不变（已在 Down/Drag 中更新），无需重绘
+                false
+            } else {
+                false
             }
         }
-        // 其他鼠标事件忽略（缩放通过终端字体大小控制，如 Ctrl+滚轮）
-        _ => {}
+        // 其他鼠标事件忽略（MouseEventKind::Moved、滚轮等）
+        // Moved 事件是鼠标在终端内移动但未按下按键，频率极高，
+        // 不做任何处理也不触发重绘，是减少抖动的关键过滤点
+        _ => false,
     }
 }
