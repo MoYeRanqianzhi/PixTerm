@@ -1,0 +1,237 @@
+# =============================================================================
+# CI 工作流 - 持续集成检查 (Continuous Integration)
+# =============================================================================
+#
+# 项目：PixTerm - 终端像素画板程序
+#
+# 功能说明：
+#   本工作流在每次代码推送或 Pull Request 时自动运行，执行以下检查：
+#   1. 跨平台编译 —— 确保代码在 Linux / Windows / macOS 上均可编译通过
+#   2. 单元测试   —— 运行项目中的所有测试，验证功能正确性
+#   3. Clippy      —— Rust 官方 lint 工具，检测常见错误和代码异味
+#   4. Rustfmt     —— 代码格式检查，确保团队统一代码风格
+#   5. 依赖审计   —— 检测依赖中已知的安全漏洞
+#
+# 注意事项：
+#   - 项目使用 Rust edition 2024，需要较新的 Rust 工具链
+#   - Cargo.lock 已提交到仓库，缓存键基于 Cargo.lock 的哈希值
+#   - clippy 和 fmt 当前设为 continue-on-error: true（软性检查），
+#     项目稳定后可改为 false 以强制通过
+# =============================================================================
+
+name: CI
+
+# ---------------------------------------------------------------------------
+# 触发条件：
+#   - push：向 master 或 main 分支推送代码时触发（排除 tag 推送，避免与发布工作流重复）
+#   - pull_request：向 master 或 main 分支提交 PR 时触发
+# 这确保了所有进入主分支的代码都经过 CI 检查
+# ---------------------------------------------------------------------------
+on:
+  push:
+    branches: [ master, main ]
+    tags-ignore: ['**']
+  pull_request:
+    branches: [ master, main ]
+
+# ---------------------------------------------------------------------------
+# 全局环境变量
+# ---------------------------------------------------------------------------
+env:
+  # 启用 cargo 输出着色，方便在 Actions 日志中阅读
+  CARGO_TERM_COLOR: always
+  # 增量编译在 CI 中反而会因缓存恢复开销降低效率，显式禁用
+  CARGO_INCREMENTAL: 0
+
+# ---------------------------------------------------------------------------
+# 作业定义
+# ---------------------------------------------------------------------------
+jobs:
+
+  # =========================================================================
+  # 作业 1：跨平台编译检查
+  # =========================================================================
+  # PixTerm 依赖 crossterm 进行终端交互，crossterm 在不同操作系统上使用
+  # 不同的后端实现（Linux: termios, Windows: WinAPI, macOS: termios），
+  # 因此必须在三大平台上分别验证编译通过。
+  # =========================================================================
+  build:
+    name: Build (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+
+    # 矩阵策略：在三大主流操作系统上并行构建
+    strategy:
+      # fail-fast 设为 false：即使某个平台编译失败，其他平台仍继续运行，
+      # 这样可以一次性发现所有平台的问题，而非逐个修复
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
+
+    steps:
+      # 步骤 1：检出代码
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      # 步骤 2：安装 Rust 稳定版工具链
+      # 使用 dtolnay/rust-toolchain 而非 actions-rs（已不再维护）
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      # 步骤 3：缓存 Cargo 依赖和编译产物
+      # 缓存可以显著加速后续构建（首次构建约需几分钟，命中缓存后可缩短大半）
+      # 缓存键基于操作系统 + Cargo.lock 哈希，依赖变更时自动失效
+      - name: Cache cargo registry and build artifacts
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-
+
+      # 步骤 4：快速编译检查（cargo check）
+      # cargo check 只做类型检查和借用检查，不生成二进制文件，速度远快于 build
+      # 用于尽早发现编译错误
+      - name: Check code compiles
+        run: cargo check --verbose
+
+      # 步骤 5：构建 release 版本
+      # PixTerm 的 Cargo.toml 配置了 LTO、单 codegen-unit 等优化选项，
+      # 这里验证 release 配置下也能正常编译（某些优化选项可能触发额外问题）
+      - name: Build release
+        run: cargo build --release --verbose
+
+  # =========================================================================
+  # 作业 2：单元测试
+  # =========================================================================
+  # 项目在 canvas.rs、color.rs、command.rs、file.rs、history.rs 中包含测试，
+  # 运行全部测试以验证核心逻辑的正确性。
+  # 测试与编译分开为独立 job，使失败原因更清晰（是编译问题还是逻辑问题）。
+  # =========================================================================
+  test:
+    name: Test
+    runs-on: ubuntu-latest
+    # 测试依赖编译通过，但这里不设 needs 依赖，让它们并行运行以节省时间；
+    # 如果编译有问题，测试也会自然失败
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo registry and build artifacts
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-test-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-test-
+
+      # 运行所有单元测试和集成测试
+      # --verbose 输出详细信息，方便在 CI 日志中排查失败原因
+      - name: Run tests
+        run: cargo test --verbose
+
+  # =========================================================================
+  # 作业 3：Clippy 代码质量检查
+  # =========================================================================
+  # Clippy 是 Rust 官方的 lint 工具，能检测出数百种常见问题，包括：
+  #   - 性能问题（不必要的克隆、低效迭代）
+  #   - 代码可读性问题（过于复杂的表达式、命名不规范）
+  #   - 潜在 bug（整数溢出、未处理的 Result）
+  #   - 惯用写法建议（更 Rust 风格的代码）
+  # =========================================================================
+  clippy:
+    name: Clippy
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      # 安装工具链时附带 clippy 组件
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+
+      - name: Cache cargo registry and build artifacts
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-clippy-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-clippy-
+
+      # -D warnings：将所有 warning 提升为 error，强制修复
+      # continue-on-error: true：当前阶段为软性检查，不阻塞合并
+      # TODO: 项目稳定后将 continue-on-error 改为 false，强制所有 PR 通过 clippy
+      - name: Run clippy
+        run: cargo clippy -- -D warnings
+        continue-on-error: true
+
+  # =========================================================================
+  # 作业 4：代码格式检查 (Rustfmt)
+  # =========================================================================
+  # 统一的代码格式有助于：
+  #   - 减少代码审查中关于风格的讨论
+  #   - 使 git diff 更干净（避免纯格式变更混入逻辑变更）
+  #   - 降低多人协作时的合并冲突概率
+  # =========================================================================
+  fmt:
+    name: Rustfmt
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      # 安装工具链时附带 rustfmt 组件
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt
+
+      # --check 模式：只检查格式，不实际修改文件
+      # 如果格式不符合要求，命令会返回非零退出码并输出 diff
+      # 开发者可在本地运行 `cargo fmt` 自动修复格式
+      # continue-on-error: true：当前阶段为软性检查
+      # TODO: 项目稳定后将 continue-on-error 改为 false
+      - name: Check formatting
+        run: cargo fmt --all -- --check
+        continue-on-error: true
+
+  # =========================================================================
+  # 作业 5：依赖安全审计 (cargo-deny)
+  # =========================================================================
+  # 检查项目依赖中是否存在已知安全漏洞（CVE）。
+  # PixTerm 依赖 crossterm、serde、flate2、png 等 crate，
+  # 这些 crate 各自又有传递依赖，任何一层出现漏洞都可能影响项目安全。
+  # 使用 cargo-deny 的 advisories 检查，对照 RustSec Advisory Database 进行扫描。
+  # =========================================================================
+  security-audit:
+    name: Security Audit
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      # 使用 EmbarkStudios 维护的 cargo-deny action
+      # 仅运行 advisories 检查（已知安全漏洞扫描）
+      # 不检查 license/ban/sources 等规则，保持检查聚焦
+      - name: Run cargo-deny (advisories)
+        uses: EmbarkStudios/cargo-deny-action@v2
+        with:
+          command: check advisories
+        continue-on-error: true

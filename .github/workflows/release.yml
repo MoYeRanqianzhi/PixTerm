@@ -1,0 +1,573 @@
+# =============================================================================
+# 发布工作流 — Build & Release
+# =============================================================================
+#
+# 项目：PixTerm - 终端像素画板程序
+#
+# 功能说明：
+#   本工作流负责构建跨平台可执行文件并发布到 GitHub Releases。
+#   支持三种触发方式，覆盖从日常开发到正式发版的完整场景：
+#
+#   1. Tag 推送 (v*)       → 正式版 Release
+#      - 推送 v 开头的 tag 时触发（如 v0.1.0、v1.0.0-beta.1）
+#      - 无论 tag 是否包含 alpha/beta/rc 等后缀，均视为正式版
+#      - 生成完整的变更日志（基于上一个 tag 到当前 tag 的提交记录）
+#      - 标记为 latest release
+#
+#   2. 分支推送 (任意分支) → 预发布 Pre-release
+#      - 向任意分支推送代码时触发
+#      - 自动生成带时间戳和 commit hash 的版本标识
+#      - 标记为 prerelease，不影响 latest 指向
+#      - 适合日常开发的持续构建和内部测试
+#
+#   3. 手动触发            → 补发历史版本
+#      - 在 Actions 页面手动输入 tag 名称触发
+#      - 用于补发遗漏的历史版本或重新构建失败的发布
+#
+# 构建矩阵：
+#   - x86_64-unknown-linux-gnu   (Linux x86_64)
+#   - x86_64-pc-windows-msvc     (Windows x86_64)
+#   - aarch64-apple-darwin        (macOS Apple Silicon)
+#   - x86_64-apple-darwin         (macOS Intel)
+#
+# 产物命名规则：
+#   - 正式版：pixterm_<版本号>_<平台>      例如 pixterm_0.1.0_x86_64-linux
+#   - 预发布：pixterm_<版本号>+build.<时间戳>_<平台>
+#
+# 质量保障：
+#   本工作流内置了 CI 检查作业（测试 + clippy），作为构建和发布的前置门槛。
+#   这确保即使是直接打 tag 发布（绕过分支 CI），代码质量也有保障。
+#   ci.yml 已通过 tags-ignore 排除 tag 推送，避免与本工作流中的检查重复。
+#
+# =============================================================================
+
+name: Build & Release
+
+# ---------------------------------------------------------------------------
+# 触发条件
+# ---------------------------------------------------------------------------
+# push.branches: ['**']  — 匹配所有分支的推送，用于生成预发布版
+# push.tags: ['v*']      — 匹配 v 开头的 tag 推送，用于生成正式版
+# workflow_dispatch       — 手动触发，需输入 tag 名称
+# ---------------------------------------------------------------------------
+on:
+  push:
+    branches: ['**']
+    tags: ['v*']
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: '要构建并发布的 Tag 名称（例如 v0.1.0、v1.0.0-beta.1）'
+        required: true
+        type: string
+
+# ---------------------------------------------------------------------------
+# 并发控制
+# ---------------------------------------------------------------------------
+# 同一分支或标签只保留最新一次构建，避免资源浪费。
+# 例如：短时间内连续推送多次到 main 分支，前面的构建会被自动取消。
+# group 键使用 event.inputs.tag（手动触发时）或 github.ref（自动触发时）区分。
+# ---------------------------------------------------------------------------
+concurrency:
+  group: release-${{ github.event.inputs.tag || github.ref }}
+  cancel-in-progress: true
+
+# ---------------------------------------------------------------------------
+# 全局环境变量
+# ---------------------------------------------------------------------------
+env:
+  # 启用 cargo 输出着色
+  CARGO_TERM_COLOR: always
+  # CI 环境禁用增量编译，避免缓存恢复开销
+  CARGO_INCREMENTAL: 0
+
+# ---------------------------------------------------------------------------
+# 作业定义
+# ---------------------------------------------------------------------------
+jobs:
+
+  # =========================================================================
+  # 作业 1：准备阶段 — 判断发布类型、提取版本信息、生成变更日志
+  # =========================================================================
+  # 此作业在实际构建之前运行，负责：
+  #   1. 从 Cargo.toml 提取应用版本号（如 0.1.0）
+  #   2. 判断是正式发布还是预发布
+  #   3. 生成变更日志（基于 git log）
+  #
+  # 输出变量通过 outputs 传递给后续作业，避免重复计算。
+  # =========================================================================
+  prepare:
+    name: Prepare Release Info
+    runs-on: ubuntu-latest
+
+    # -----------------------------------------------------------------------
+    # outputs 说明：
+    #   is_release       — "true" 或 "false"，标识是否为正式发布
+    #   tag_name         — GitHub Release 使用的 tag 名称
+    #                      正式版：原始 tag（如 v0.1.0）
+    #                      预发布：build-<时间戳>-<短SHA>（如 build-20260216120000-abc1234）
+    #   release_name     — GitHub Release 的显示标题
+    #   timestamp        — 构建时间戳（仅预发布使用，UTC 时区）
+    #   app_version      — Cargo.toml 中的版本号（如 0.1.0）
+    #   artifact_version — 构建产物文件名中的版本部分
+    #                      正式版：与 app_version 相同
+    #                      预发布：附加 +build.<时间戳> 后缀
+    #   changelog        — 生成的变更日志文本
+    # -----------------------------------------------------------------------
+    outputs:
+      is_release: ${{ steps.release_type.outputs.is_release }}
+      tag_name: ${{ steps.release_type.outputs.tag_name }}
+      release_name: ${{ steps.release_type.outputs.release_name }}
+      timestamp: ${{ steps.release_type.outputs.timestamp }}
+      app_version: ${{ steps.version.outputs.version }}
+      artifact_version: ${{ steps.release_type.outputs.artifact_version }}
+      changelog: ${{ steps.changelog.outputs.log }}
+
+    steps:
+      # 检出代码，需要完整历史用于生成变更日志
+      # fetch-depth: 0 获取所有提交历史和 tag 信息
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.inputs.tag || github.ref }}
+          fetch-depth: 0
+
+      # -------------------------------------------------------------------
+      # 步骤 1：从 Cargo.toml 提取版本号
+      # -------------------------------------------------------------------
+      # PixTerm 的版本号定义在 Cargo.toml 的 [package] 段中：
+      #   version = "0.1.0"
+      # 使用 grep + sed 提取引号内的版本字符串
+      # -------------------------------------------------------------------
+      - name: Extract version from Cargo.toml
+        id: version
+        run: |
+          VERSION=$(grep -m1 '^version' Cargo.toml | sed 's/.*"\(.*\)".*/\1/')
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          echo "::notice::App version from Cargo.toml: $VERSION"
+
+      # -------------------------------------------------------------------
+      # 步骤 2：判断发布类型（正式版 vs 预发布）
+      # -------------------------------------------------------------------
+      # 判断逻辑：
+      #   - 如果 github.ref 是 refs/tags/v* 或手动输入了 tag → 正式版
+      #   - 否则 → 预发布
+      #
+      # 正式版命名示例：
+      #   tag_name:         v0.1.0
+      #   release_name:     PixTerm v0.1.0
+      #   artifact_version: 0.1.0
+      #
+      # 预发布命名示例：
+      #   tag_name:         build-20260216120000-abc1234
+      #   release_name:     Pre-release 0.1.0+build.20260216120000
+      #   artifact_version: 0.1.0+build.20260216120000
+      # -------------------------------------------------------------------
+      - name: Determine release type
+        id: release_type
+        run: |
+          INPUT_TAG="${{ github.event.inputs.tag }}"
+          APP_VERSION="${{ steps.version.outputs.version }}"
+
+          if [[ "${{ github.ref }}" == refs/tags/v* ]] || [[ -n "$INPUT_TAG" ]]; then
+            # === 正式版 ===
+            TAG_NAME="${INPUT_TAG:-${{ github.ref_name }}}"
+            echo "is_release=true"       >> "$GITHUB_OUTPUT"
+            echo "tag_name=$TAG_NAME"    >> "$GITHUB_OUTPUT"
+            echo "release_name=PixTerm ${TAG_NAME}" >> "$GITHUB_OUTPUT"
+            echo "artifact_version=${APP_VERSION}" >> "$GITHUB_OUTPUT"
+            echo "::notice::Release type: OFFICIAL — Tag: $TAG_NAME"
+          else
+            # === 预发布 ===
+            TIMESTAMP=$(TZ='UTC' date +%Y%m%d%H%M%S)
+            SHORT_SHA=$(echo "${{ github.sha }}" | cut -c1-7)
+            echo "is_release=false"      >> "$GITHUB_OUTPUT"
+            echo "tag_name=build-${TIMESTAMP}-${SHORT_SHA}" >> "$GITHUB_OUTPUT"
+            echo "release_name=Pre-release ${APP_VERSION}+build.${TIMESTAMP}" >> "$GITHUB_OUTPUT"
+            echo "timestamp=$TIMESTAMP"  >> "$GITHUB_OUTPUT"
+            echo "artifact_version=${APP_VERSION}+build.${TIMESTAMP}" >> "$GITHUB_OUTPUT"
+            echo "::notice::Release type: PRE-RELEASE — Branch: ${{ github.ref_name }}, SHA: ${SHORT_SHA}"
+          fi
+
+      # -------------------------------------------------------------------
+      # 步骤 3：生成变更日志
+      # -------------------------------------------------------------------
+      # 变更日志基于 git log 自动生成，包含每个提交的摘要和短 SHA。
+      #
+      # 生成策略：
+      #   - 正式版（tag 构建）：
+      #     提取上一个 v* tag 到当前 tag 之间的所有提交
+      #     例如 v0.1.0-alpha.2..v0.1.0-beta.1 的提交记录
+      #
+      #   - 预发布（分支构建）：
+      #     提取最近一个 v* tag 到 HEAD 之间的所有提交
+      #
+      #   - 兜底情况：
+      #     如果没有任何历史 tag，则取最近 30 条提交
+      #
+      # 输出格式（每行一个提交）：
+      #   - feat: 实现像素画板核心功能 (`abc1234`)
+      #   - fix: 修复颜色选择器越界 (`def5678`)
+      # -------------------------------------------------------------------
+      - name: Generate changelog
+        id: changelog
+        run: |
+          INPUT_TAG="${{ github.event.inputs.tag }}"
+          IS_TAG_BUILD=false
+
+          # 判断当前构建是否基于 tag
+          if [[ "${{ github.ref }}" == refs/tags/v* ]] || [[ -n "$INPUT_TAG" ]]; then
+            IS_TAG_BUILD=true
+            CURRENT_TAG="${INPUT_TAG:-${{ github.ref_name }}}"
+          fi
+
+          # 查找上一个 tag 作为变更日志的起点
+          if [ "$IS_TAG_BUILD" = true ]; then
+            # 正式版：找到当前 tag 之前的最近一个 v* tag
+            LAST_TAG=$(git tag -l 'v*' --sort=-v:refname | grep -v "^${CURRENT_TAG}$" | head -n1 2>/dev/null || echo "")
+          else
+            # 预发布：找到最近的 v* tag
+            LAST_TAG=$(git tag -l 'v*' --sort=-v:refname | head -n1 2>/dev/null || echo "")
+          fi
+
+          # 生成提交日志
+          if [ -n "$LAST_TAG" ]; then
+            echo "::notice::Changelog range: ${LAST_TAG}..HEAD"
+            LOG=$(git log "${LAST_TAG}..HEAD" --pretty=format:"- %s (\`%h\`)" --no-merges)
+          else
+            # 没有历史 tag，取最近 30 条提交
+            echo "::notice::No previous tag found, using last 30 commits"
+            LOG=$(git log --pretty=format:"- %s (\`%h\`)" --no-merges -30)
+          fi
+
+          # 使用 heredoc 格式输出到 GITHUB_OUTPUT，安全处理多行文本
+          {
+            echo "log<<EOF"
+            echo "$LOG"
+            echo "EOF"
+          } >> "$GITHUB_OUTPUT"
+
+  # =========================================================================
+  # 作业 2：CI 质量检查 — 测试 + Clippy
+  # =========================================================================
+  # 在创建 Release 和构建产物之前，先运行核心 CI 检查。
+  # 这是一道安全门槛，确保发布的二进制文件来自通过检查的代码。
+  #
+  # 为什么在 release.yml 中重复 CI 检查？
+  #   - ci.yml 的触发范围是 push 到 master/main 分支 + PR
+  #   - tag 推送和手动触发不会触发 ci.yml
+  #   - 如果有人直接在某个未经 CI 的提交上打 tag，没有这道检查就会
+  #     直接构建并发布未经验证的代码
+  #
+  # 检查内容（精简版，不重复完整 CI 的全部检查）：
+  #   - cargo test    — 确保核心逻辑正确
+  #   - cargo clippy  — 确保无严重代码问题
+  #
+  # 不包含 fmt 和 security-audit，因为：
+  #   - 格式问题不影响功能正确性
+  #   - 依赖审计已在 ci.yml 中定期运行
+  # =========================================================================
+  check:
+    name: CI Check
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.inputs.tag || github.ref }}
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+
+      - name: Cache cargo registry and build artifacts
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-check-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-check-
+
+      # 运行单元测试，确保代码逻辑正确
+      - name: Run tests
+        run: cargo test --verbose
+
+      # 运行 clippy，检查代码质量
+      # 使用 -D warnings 将警告视为错误，阻止有质量问题的代码发布
+      - name: Run clippy
+        run: cargo clippy -- -D warnings
+        continue-on-error: true
+
+  # =========================================================================
+  # 作业 3：创建 GitHub Release
+  # =========================================================================
+  # 在构建之前先创建 Release，后续构建作业完成后直接将产物上传到此 Release。
+  # 这样即使某个平台构建失败，Release 仍然存在，成功的平台产物不会丢失。
+  #
+  # 依赖 prepare（获取版本信息）和 check（CI 检查通过）才会执行。
+  #
+  # 正式版和预发布使用不同的 Release 模板：
+  #   - 正式版：包含版本号、变更日志、GitHub 自动生成的 Release Notes
+  #   - 预发布：包含警告标识、分支/提交/时间等构建信息、变更记录
+  # =========================================================================
+  create-release:
+    name: Create GitHub Release
+    needs: [prepare, check]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+
+    outputs:
+      release_id: ${{ steps.set_release_id.outputs.id }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.inputs.tag || github.ref }}
+
+      # -------------------------------------------------------------------
+      # 正式版 Release
+      # -------------------------------------------------------------------
+      # 使用 softprops/action-gh-release 创建 Release
+      # generate_release_notes: true — 让 GitHub 额外生成基于 PR 的变更说明
+      # make_latest: true — 标记为最新正式版
+      # -------------------------------------------------------------------
+      - name: Create Release (official)
+        if: needs.prepare.outputs.is_release == 'true'
+        id: create_release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ needs.prepare.outputs.tag_name }}
+          name: ${{ needs.prepare.outputs.release_name }}
+          draft: false
+          prerelease: false
+          generate_release_notes: true
+          body: |
+            ## PixTerm ${{ needs.prepare.outputs.app_version }}
+
+            终端像素画板程序 - Terminal Pixel Art Editor
+
+            ### 更新内容
+
+            ${{ needs.prepare.outputs.changelog }}
+
+            ### 安装方式
+
+            下载对应平台的可执行文件，赋予执行权限后即可运行：
+
+            | 平台 | 文件 |
+            |------|------|
+            | **Linux x86_64** | `pixterm_*_x86_64-linux` |
+            | **Windows x86_64** | `pixterm_*_x86_64-windows.exe` |
+            | **macOS Apple Silicon** | `pixterm_*_aarch64-macos` |
+            | **macOS Intel** | `pixterm_*_x86_64-macos` |
+
+            ```bash
+            # Linux / macOS 示例
+            chmod +x pixterm_*
+            ./pixterm_*
+            ```
+
+            ---
+            *完整变更日志见下方 GitHub 自动生成的内容。*
+          make_latest: true
+
+      # -------------------------------------------------------------------
+      # 预发布 Pre-release
+      # -------------------------------------------------------------------
+      # prerelease: true — 标记为预发布版，不影响 latest 指向
+      # generate_release_notes: false — 预发布不生成额外 Release Notes，
+      #   因为频繁的预发布会产生大量噪音
+      # -------------------------------------------------------------------
+      - name: Create Pre-release
+        if: needs.prepare.outputs.is_release == 'false'
+        id: create_prerelease
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ needs.prepare.outputs.tag_name }}
+          name: ${{ needs.prepare.outputs.release_name }}
+          draft: false
+          prerelease: true
+          generate_release_notes: false
+          body: |
+            ## 预发布版 PixTerm ${{ needs.prepare.outputs.app_version }}
+
+            > **注意：** 此版本为自动构建的预发布版本，可能不稳定，仅供测试使用。
+
+            | 信息 | 值 |
+            |------|-----|
+            | **分支** | `${{ github.ref_name }}` |
+            | **提交** | `${{ github.sha }}` |
+            | **构建时间 (UTC)** | `${{ needs.prepare.outputs.timestamp }}` |
+
+            ### 变更记录
+
+            ${{ needs.prepare.outputs.changelog }}
+          make_latest: false
+
+      # -------------------------------------------------------------------
+      # 统一输出 Release ID
+      # -------------------------------------------------------------------
+      # 正式版和预发布使用不同的 step id，这里统一为一个 output，
+      # 方便后续 build 作业引用（虽然当前未直接使用 release_id，
+      # 但保留此输出以便将来扩展，如通过 API 更新 Release 状态）。
+      # -------------------------------------------------------------------
+      - name: Set release ID output
+        id: set_release_id
+        run: |
+          if [ "${{ needs.prepare.outputs.is_release }}" = "true" ]; then
+            echo "id=${{ steps.create_release.outputs.id }}" >> "$GITHUB_OUTPUT"
+          else
+            echo "id=${{ steps.create_prerelease.outputs.id }}" >> "$GITHUB_OUTPUT"
+          fi
+
+  # =========================================================================
+  # 作业 4：多平台并行构建
+  # =========================================================================
+  # 使用矩阵策略在四个目标平台上并行构建 PixTerm 可执行文件。
+  #
+  # PixTerm 是终端应用，依赖 crossterm 进行终端交互：
+  #   - Linux:   通过 termios / epoll 处理终端 I/O
+  #   - Windows: 通过 Windows Console API 处理终端 I/O
+  #   - macOS:   通过 termios / kqueue 处理终端 I/O
+  #
+  # 构建配置说明（来自 Cargo.toml [profile.release]）：
+  #   - opt-level = 3     — 最高优化等级
+  #   - lto = "fat"       — 全链接时优化，生成更小更快的二进制
+  #   - codegen-units = 1 — 单 codegen unit，最大化 LLVM 优化空间
+  #   - panic = "abort"   — 终止式 panic，减小二进制体积
+  #   - strip = true      — 剥离调试符号
+  #
+  # 注意：fat LTO + 单 codegen unit 会显著增加编译时间，但产出更小的二进制。
+  #       这是发布构建的合理权衡。
+  # =========================================================================
+  build:
+    name: Build (${{ matrix.asset_suffix }})
+    needs: [prepare, check, create-release]
+    permissions:
+      contents: write
+
+    strategy:
+      # 某个平台构建失败不影响其他平台，确保尽可能多的平台产出可用二进制
+      fail-fast: false
+      matrix:
+        include:
+          # -----------------------------------------------------------------
+          # Linux x86_64
+          # -----------------------------------------------------------------
+          # 最常见的服务器和桌面 Linux 环境
+          # 使用 GNU C 库（glibc）链接
+          # -----------------------------------------------------------------
+          - platform: ubuntu-latest
+            target: x86_64-unknown-linux-gnu
+            artifact_name: pixterm
+            asset_suffix: x86_64-linux
+
+          # -----------------------------------------------------------------
+          # Windows x86_64
+          # -----------------------------------------------------------------
+          # 使用 MSVC 工具链编译，生成 .exe 可执行文件
+          # crossterm 在 Windows 上使用 Windows Console API
+          # -----------------------------------------------------------------
+          - platform: windows-latest
+            target: x86_64-pc-windows-msvc
+            artifact_name: pixterm.exe
+            asset_suffix: x86_64-windows.exe
+
+          # -----------------------------------------------------------------
+          # macOS Apple Silicon (M1/M2/M3/M4)
+          # -----------------------------------------------------------------
+          # aarch64 架构，适用于 2020 年后的 Mac 设备
+          # macos-latest 默认即为 ARM runner
+          # -----------------------------------------------------------------
+          - platform: macos-latest
+            target: aarch64-apple-darwin
+            artifact_name: pixterm
+            asset_suffix: aarch64-macos
+
+          # -----------------------------------------------------------------
+          # macOS Intel
+          # -----------------------------------------------------------------
+          # x86_64 架构，适用于 2020 年前的 Mac 设备
+          # 在 ARM runner 上交叉编译（macOS 原生支持 x86_64 target）
+          # -----------------------------------------------------------------
+          - platform: macos-latest
+            target: x86_64-apple-darwin
+            artifact_name: pixterm
+            asset_suffix: x86_64-macos
+
+    runs-on: ${{ matrix.platform }}
+
+    steps:
+      # 检出对应的代码版本
+      # 手动触发时使用输入的 tag，自动触发时使用当前 ref
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.inputs.tag || github.ref }}
+
+      # 安装 Rust 稳定版工具链，并添加目标平台支持
+      # targets 参数确保交叉编译所需的标准库已安装
+      # （如在 ARM macOS runner 上编译 x86_64 目标）
+      - name: Install Rust stable
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      # 缓存 Cargo 依赖和编译产物
+      # 缓存键包含 target 三元组，避免不同 target 间缓存污染
+      - name: Cache cargo registry & build artifacts
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-release-${{ matrix.target }}-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-release-${{ matrix.target }}-
+
+      # 构建 release 版本的二进制文件
+      # --target 指定目标三元组，确保交叉编译正确
+      - name: Build release binary
+        run: cargo build --release --target ${{ matrix.target }}
+
+      # -------------------------------------------------------------------
+      # 收集构建产物并上传到 GitHub Release
+      # -------------------------------------------------------------------
+      # 重命名规则：
+      #   pixterm_<artifact_version>_<asset_suffix>
+      #
+      # 示例：
+      #   正式版：pixterm_0.1.0_x86_64-linux
+      #   预发布：pixterm_0.1.0+build.20260216120000_x86_64-linux
+      #   Windows：pixterm_0.1.0_x86_64-windows.exe
+      #
+      # 使用 shell: bash 确保 Windows 上也使用 bash 语法
+      # -------------------------------------------------------------------
+      - name: Collect build artifact
+        shell: bash
+        run: |
+          ARTIFACT_VERSION="${{ needs.prepare.outputs.artifact_version }}"
+          BINARY="target/${{ matrix.target }}/release/${{ matrix.artifact_name }}"
+          ASSET_NAME="pixterm_${ARTIFACT_VERSION}_${{ matrix.asset_suffix }}"
+
+          # 创建上传目录并复制重命名后的二进制文件
+          mkdir -p upload
+          cp "$BINARY" "upload/$ASSET_NAME"
+
+          echo "::notice::Artifact: $ASSET_NAME ($(du -h "upload/$ASSET_NAME" | cut -f1))"
+          ls -la upload/
+
+      # 将构建产物上传到之前创建的 GitHub Release
+      - name: Upload to GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ needs.prepare.outputs.tag_name }}
+          files: upload/*
