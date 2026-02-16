@@ -76,7 +76,7 @@ pub fn can_redo(&self) -> bool
 
 ## 更新日志
 
-### v0.1.1-alpha.1 (开发中)
+### v0.1.1-alpha.2 (开发中)
 
 **核心功能**：
 - 基于 HashMap 稀疏存储的无限画布
