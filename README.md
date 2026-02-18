@@ -15,13 +15,13 @@
 - **命令模式**：ESC 进入，支持多种命令操作
 - **帮助覆盖层**：内置帮助信息显示
 
-![](assets/Screenshot_1.png)
+![](assets/screenshot_1.png)
 
-![](assets/Screenshot_2.png)
+![](assets/screenshot_2.png)
 
-![](assets/Screenshot_3.png)
+![](assets/screenshot_3.png)
 
-![](assets/Screenshot_4.png)
+![](assets/screenshot_4.png)
 
 ## 安装与运行
 
