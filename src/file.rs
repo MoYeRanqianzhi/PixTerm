@@ -12,19 +12,40 @@ use std::fs;
 use std::io::{self, Read as _, Write as _};
 use std::path::Path;
 
-/// 画布文件的 JSON 序列化结构体
+/// 画布文件的 JSON 序列化结构体（v2.0.0 格式）
 /// 用于将画布数据持久化到磁盘（.ptd 和 .json 共用此结构）
+/// pixels 为三层嵌套：图层 → 行 → 像素，为未来多图层功能预留结构
 #[derive(Serialize, Deserialize)]
 pub struct SaveData {
-    /// 文件格式版本号
+    /// 文件格式版本号（当前为 "2.0.0"）
     pub version: String,
     /// 画布宽度（由像素边界框计算得出）
     pub width: u16,
     /// 画布高度（由像素边界框计算得出）
     pub height: u16,
-    /// 像素数据：二维数组，每个元素为 null 或 [r, g, b]
+    /// 像素数据：三层嵌套数组 [图层][行][列]
+    /// 外层 Vec 为图层列表（当前仅使用单图层 layers[0]）
+    /// 中层 Vec 为行列表
+    /// 内层每个元素为 null 或 [r, g, b]
     /// 坐标系原点为边界框左上角 (min_x, min_y)
-    pub pixels: Vec<Vec<Option<[u8; 3]>>>,
+    pub pixels: Vec<Vec<Vec<Option<[u8; 3]>>>>,
+}
+
+/// v1.0.0 旧格式的反序列化结构体（向后兼容）
+/// pixels 为二层嵌套：行 → 像素（无图层维度）
+#[derive(Deserialize)]
+struct SaveDataV1 {
+    /// 文件格式版本号（"1.0.0"）
+    #[allow(dead_code)]
+    version: String,
+    /// 画布宽度
+    #[allow(dead_code)]
+    width: u16,
+    /// 画布高度
+    #[allow(dead_code)]
+    height: u16,
+    /// 像素数据：二层嵌套数组 [行][列]，每个元素为 null 或 [r, g, b]
+    pixels: Vec<Vec<Option<[u8; 3]>>>,
 }
 
 /// 将画布保存到文件
@@ -50,8 +71,8 @@ pub fn save_canvas(canvas: &Canvas, path: &Path) -> io::Result<()> {
         }
     };
 
-    // 构造二维像素数组：以边界框左上角为原点
-    let mut pixels: Vec<Vec<Option<[u8; 3]>>> = Vec::with_capacity(height as usize);
+    // 构造单图层的二维像素数组：以边界框左上角为原点
+    let mut layer: Vec<Vec<Option<[u8; 3]>>> = Vec::with_capacity(height as usize);
     for row in 0..height {
         let mut row_data: Vec<Option<[u8; 3]>> = Vec::with_capacity(width as usize);
         for col in 0..width {
@@ -64,15 +85,15 @@ pub fn save_canvas(canvas: &Canvas, path: &Path) -> io::Result<()> {
                 .map(|(r, g, b)| [r, g, b]);
             row_data.push(pixel);
         }
-        pixels.push(row_data);
+        layer.push(row_data);
     }
 
-    // 构造序列化数据结构
+    // 构造序列化数据结构：pixels 为图层列表，当前仅包含单图层
     let save_data = SaveData {
-        version: "1.0.0".to_string(),
+        version: "2.0.0".to_string(),
         width,
         height,
-        pixels,
+        pixels: vec![layer],
     };
 
     // 根据扩展名判断存储格式
@@ -115,27 +136,25 @@ pub fn load_canvas(path: &Path) -> io::Result<Canvas> {
         .extension()
         .is_some_and(|ext| ext.eq_ignore_ascii_case("ptd"));
 
-    // 读取并反序列化 JSON 数据
-    let save_data: SaveData = if is_ptd {
-        // .ptd 格式：读取二进制数据 → gzip 解压 → JSON 反序列化
+    // 读取 JSON 文本，通过 version 字段判断格式版本后反序列化
+    let layer_pixels: Vec<Vec<Option<[u8; 3]>>> = if is_ptd {
+        // .ptd 格式：读取二进制数据 → gzip 解压 → JSON 文本
         let compressed = fs::read(path)?;
         let mut decoder = GzDecoder::new(&compressed[..]);
         let mut json = String::new();
         decoder.read_to_string(&mut json)?;
-        serde_json::from_str(&json)
-            .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?
+        parse_pixels_from_json(&json)?
     } else {
-        // .json 或其他格式：直接读取文本 → JSON 反序列化
+        // .json 或其他格式：直接读取 JSON 文本
         let json = fs::read_to_string(path)?;
-        serde_json::from_str(&json)
-            .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?
+        parse_pixels_from_json(&json)?
     };
 
     // 创建空画布，逐像素填充
     let mut canvas = Canvas::new();
 
-    // 遍历二维像素数组，将有颜色的像素写入 HashMap
-    for (y, row) in save_data.pixels.iter().enumerate() {
+    // 遍历第一图层的二维像素数组，将有颜色的像素写入 HashMap
+    for (y, row) in layer_pixels.iter().enumerate() {
         for (x, pixel) in row.iter().enumerate() {
             if let Some(arr) = pixel {
                 let color: Rgb = (arr[0], arr[1], arr[2]);
@@ -145,6 +164,70 @@ pub fn load_canvas(path: &Path) -> io::Result<Canvas> {
     }
 
     Ok(canvas)
+}
+
+/// 仅提取 version 字段的轻量结构体，用于在完整反序列化前判断文件格式版本
+#[derive(Deserialize)]
+struct VersionProbe {
+    /// 文件格式版本号字符串（如 "1.0.0"、"2.0.0"）
+    version: String,
+}
+
+/// 从 JSON 字符串解析像素数据，通过 version 字段判断格式版本
+/// - v2.x.x：`pixels` 为三层嵌套（图层→行→像素），取第一图层
+/// - v1.x.x：`pixels` 为二层嵌套（行→像素），直接使用
+/// - 其他版本或缺少 version 字段：返回错误
+///
+/// 返回单图层的二维像素数组
+fn parse_pixels_from_json(json: &str) -> io::Result<Vec<Vec<Option<[u8; 3]>>>> {
+    // 第一步：仅解析 version 字段，判断文件格式版本
+    let probe: VersionProbe = serde_json::from_str(json).map_err(|e| {
+        io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!("文件格式无效，无法解析版本信息: {e}"),
+        )
+    })?;
+
+    // 提取主版本号（version 字符串中第一个 '.' 之前的部分）
+    let major_version = probe
+        .version
+        .split('.')
+        .next()
+        .unwrap_or("");
+
+    // 第二步：根据主版本号选择对应的反序列化结构
+    match major_version {
+        // v2.x.x：三层嵌套格式（图层→行→像素）
+        "2" => {
+            let save_data: SaveData = serde_json::from_str(json).map_err(|e| {
+                io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    format!("v2 格式解析失败: {e}"),
+                )
+            })?;
+            // 取第一图层；若图层列表为空，返回空数组
+            let layer = save_data.pixels.into_iter().next().unwrap_or_default();
+            Ok(layer)
+        }
+        // v1.x.x：二层嵌套格式（行→像素），向后兼容旧文件
+        "1" => {
+            let save_data_v1: SaveDataV1 = serde_json::from_str(json).map_err(|e| {
+                io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    format!("v1 格式解析失败: {e}"),
+                )
+            })?;
+            Ok(save_data_v1.pixels)
+        }
+        // 未知主版本号：拒绝加载并提示用户
+        _ => Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!(
+                "不支持的文件版本 \"{}\"，当前支持 v1.x.x 和 v2.x.x",
+                probe.version
+            ),
+        )),
+    }
 }
 
 /// 将画布导出为 PNG 图片
