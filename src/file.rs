@@ -12,9 +12,22 @@ use std::fs;
 use std::io::{self, Read as _, Write as _};
 use std::path::Path;
 
+/// 单个图层的序列化结构体
+/// 每个图层包含名称、可见性、以及该图层的像素数据
+#[derive(Serialize, Deserialize)]
+pub struct LayerData {
+    /// 图层名称（如 "图层 1"、"背景"）
+    pub name: String,
+    /// 图层是否可见（false 时加载后不渲染该图层）
+    pub display: bool,
+    /// 该图层的像素数据：二层嵌套数组 [行][列]
+    /// 每个元素为 null（透明）或 [r, g, b]
+    pub pixels: Vec<Vec<Option<[u8; 3]>>>,
+}
+
 /// 画布文件的 JSON 序列化结构体（v2.0.0 格式）
 /// 用于将画布数据持久化到磁盘（.ptd 和 .json 共用此结构）
-/// pixels 为三层嵌套：图层 → 行 → 像素，为未来多图层功能预留结构
+/// 使用 layers 数组组织多图层，为未来多图层功能预留结构
 #[derive(Serialize, Deserialize)]
 pub struct SaveData {
     /// 文件格式版本号（当前为 "2.0.0"）
@@ -23,12 +36,8 @@ pub struct SaveData {
     pub width: u16,
     /// 画布高度（由像素边界框计算得出）
     pub height: u16,
-    /// 像素数据：三层嵌套数组 [图层][行][列]
-    /// 外层 Vec 为图层列表（当前仅使用单图层 layers[0]）
-    /// 中层 Vec 为行列表
-    /// 内层每个元素为 null 或 [r, g, b]
-    /// 坐标系原点为边界框左上角 (min_x, min_y)
-    pub pixels: Vec<Vec<Vec<Option<[u8; 3]>>>>,
+    /// 图层列表：每个元素为一个 LayerData（当前仅使用单图层 layers[0]）
+    pub layers: Vec<LayerData>,
 }
 
 /// v1.0.0 旧格式的反序列化结构体（向后兼容）
@@ -88,12 +97,16 @@ pub fn save_canvas(canvas: &Canvas, path: &Path) -> io::Result<()> {
         layer.push(row_data);
     }
 
-    // 构造序列化数据结构：pixels 为图层列表，当前仅包含单图层
+    // 构造序列化数据结构：layers 包含单个默认图层
     let save_data = SaveData {
         version: "2.0.0".to_string(),
         width,
         height,
-        pixels: vec![layer],
+        layers: vec![LayerData {
+            name: "图层 1".to_string(),
+            display: true,
+            pixels: layer,
+        }],
     };
 
     // 根据扩展名判断存储格式
@@ -174,7 +187,7 @@ struct VersionProbe {
 }
 
 /// 从 JSON 字符串解析像素数据，通过 version 字段判断格式版本
-/// - v2.x.x：`pixels` 为三层嵌套（图层→行→像素），取第一图层
+/// - v2.x.x：从 `layers` 数组中取第一个可见图层的 `pixels`
 /// - v1.x.x：`pixels` 为二层嵌套（行→像素），直接使用
 /// - 其他版本或缺少 version 字段：返回错误
 ///
@@ -197,7 +210,7 @@ fn parse_pixels_from_json(json: &str) -> io::Result<Vec<Vec<Option<[u8; 3]>>>> {
 
     // 第二步：根据主版本号选择对应的反序列化结构
     match major_version {
-        // v2.x.x：三层嵌套格式（图层→行→像素）
+        // v2.x.x：layers 数组格式，每个图层含 name/display/pixels
         "2" => {
             let save_data: SaveData = serde_json::from_str(json).map_err(|e| {
                 io::Error::new(
@@ -205,9 +218,14 @@ fn parse_pixels_from_json(json: &str) -> io::Result<Vec<Vec<Option<[u8; 3]>>>> {
                     format!("v2 格式解析失败: {e}"),
                 )
             })?;
-            // 取第一图层；若图层列表为空，返回空数组
-            let layer = save_data.pixels.into_iter().next().unwrap_or_default();
-            Ok(layer)
+            // 取第一个图层的像素数据；若图层列表为空，返回空数组
+            let pixels = save_data
+                .layers
+                .into_iter()
+                .next()
+                .map(|layer| layer.pixels)
+                .unwrap_or_default();
+            Ok(pixels)
         }
         // v1.x.x：二层嵌套格式（行→像素），向后兼容旧文件
         "1" => {
