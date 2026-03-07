@@ -1,6 +1,6 @@
 [package]
 name = "pixterm"
-version = "0.2.0-alpha.3"
+version = "0.2.0-alpha.4"
 edition = "2024"
 description = "终端像素画板程序 - Terminal Pixel Art Editor"
 license = "MIT"
