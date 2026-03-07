@@ -19,7 +19,7 @@ pub struct LayerData {
     /// 图层名称（如 "图层 1"、"背景"）
     pub name: String,
     /// 图层是否可见（false 时加载后不渲染该图层）
-    pub display: bool,
+    pub visible: bool,
     /// 该图层的像素数据：二层嵌套数组 [行][列]
     /// 每个元素为 null（透明）或 [r, g, b]
     pub pixels: Vec<Vec<Option<[u8; 3]>>>,
@@ -104,7 +104,7 @@ pub fn save_canvas(canvas: &Canvas, path: &Path) -> io::Result<()> {
         height,
         layers: vec![LayerData {
             name: "图层 1".to_string(),
-            display: true,
+            visible: true,
             pixels: layer,
         }],
     };
@@ -210,7 +210,7 @@ fn parse_pixels_from_json(json: &str) -> io::Result<Vec<Vec<Option<[u8; 3]>>>> {
 
     // 第二步：根据主版本号选择对应的反序列化结构
     match major_version {
-        // v2.x.x：layers 数组格式，每个图层含 name/display/pixels
+        // v2.x.x：layers 数组格式，每个图层含 name/visible/pixels
         "2" => {
             let save_data: SaveData = serde_json::from_str(json).map_err(|e| {
                 io::Error::new(
