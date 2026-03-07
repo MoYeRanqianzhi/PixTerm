@@ -106,7 +106,7 @@ fn handle_draw_mode_key(app: &mut App, key: KeyEvent) {
         KeyCode::Down => {
             app.show_cursor = true;
             if app.cursor_y < u16::MAX {
-                app.cursor_y += 1;
+                app.cursor_y = app.cursor_y.saturating_add(1);
             }
             app.ensure_cursor_visible();
         }
@@ -120,7 +120,7 @@ fn handle_draw_mode_key(app: &mut App, key: KeyEvent) {
         KeyCode::Right => {
             app.show_cursor = true;
             if app.cursor_x < u16::MAX {
-                app.cursor_x += 1;
+                app.cursor_x = app.cursor_x.saturating_add(1);
             }
             app.ensure_cursor_visible();
         }

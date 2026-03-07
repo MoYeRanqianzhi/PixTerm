@@ -118,7 +118,7 @@ pub fn save_canvas(canvas: &Canvas, path: &Path) -> io::Result<()> {
         // .ptd 格式：紧凑 JSON → gzip 压缩
         // 使用紧凑格式（to_string 而非 to_string_pretty）以进一步减小体积
         let json = serde_json::to_string(&save_data)
-            .map_err(|e| io::Error::new(io::ErrorKind::Other, e))?;
+            .map_err(io::Error::other)?;
 
         // 创建输出文件，使用 gzip 压缩写入
         let file = fs::File::create(path)?;
@@ -129,7 +129,7 @@ pub fn save_canvas(canvas: &Canvas, path: &Path) -> io::Result<()> {
     } else {
         // .json 或其他格式：格式化 JSON 纯文本（便于人工阅读和调试）
         let json = serde_json::to_string_pretty(&save_data)
-            .map_err(|e| io::Error::new(io::ErrorKind::Other, e))?;
+            .map_err(io::Error::other)?;
         fs::write(path, json)?;
     }
 
@@ -299,10 +299,10 @@ pub fn export_png(canvas: &Canvas, path: &Path) -> io::Result<()> {
     // 写入 PNG 头部和图像数据
     let mut writer = encoder
         .write_header()
-        .map_err(|e| io::Error::new(io::ErrorKind::Other, e))?;
+        .map_err(io::Error::other)?;
     writer
         .write_image_data(&rgba_data)
-        .map_err(|e| io::Error::new(io::ErrorKind::Other, e))?;
+        .map_err(io::Error::other)?;
 
     Ok(())
 }
@@ -326,13 +326,13 @@ pub fn import_png(path: &Path) -> io::Result<Canvas> {
     // 读取图像信息并分配输出缓冲区
     let mut reader = decoder
         .read_info()
-        .map_err(|e| io::Error::new(io::ErrorKind::Other, e))?;
+        .map_err(io::Error::other)?;
     let mut buf = vec![0u8; reader.output_buffer_size().unwrap()];
 
     // 解码第一帧图像数据到缓冲区
     let info = reader
         .next_frame(&mut buf)
-        .map_err(|e| io::Error::new(io::ErrorKind::Other, e))?;
+        .map_err(io::Error::other)?;
 
     let width = info.width;
     let height = info.height;

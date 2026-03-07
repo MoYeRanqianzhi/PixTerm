@@ -16,6 +16,7 @@ pub enum DisplayMode {
 
 /// 渲染底部状态栏（倒数第二行）
 /// 格式：[模式] 当前画笔 ██ #RRGGBB | (坐标) | 消息
+#[allow(clippy::too_many_arguments)]
 pub fn render_status_bar(
     w: &mut impl io::Write,
     row: u16,

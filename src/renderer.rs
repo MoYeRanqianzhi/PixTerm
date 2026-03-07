@@ -19,6 +19,7 @@ const PIXEL_HEIGHT: i32 = 1;
 /// 渲染完整的一帧画面
 /// 包括：画布区域、键盘光标、状态栏、调色板栏/命令行、帮助覆盖层
 /// 接受泛型 Writer 以支持 BufWriter 等缓冲写入器
+#[allow(clippy::too_many_arguments)]
 pub fn render_frame(
     w: &mut impl Write,
     canvas: &Canvas,
@@ -201,6 +202,7 @@ fn flush_color_run(w: &mut impl Write, color: Option<Rgb>, fill_str: &str) -> io
 
 /// 渲染键盘光标
 /// 在光标所在画布像素位置绘制反色方括号标记「[]」（固定 2 列 × 1 行）
+#[allow(clippy::too_many_arguments)]
 fn render_cursor(
     w: &mut impl Write,
     cursor_x: u16,

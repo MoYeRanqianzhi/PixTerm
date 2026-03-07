@@ -43,6 +43,7 @@ pub enum Command {
 /// 解析坐标参数，支持单值和范围两种格式
 /// - 单值：`"5"` → `(5, 5)`
 /// - 范围：`"5:10"` → `(5, 10)`
+///
 /// 范围的起始值必须 ≤ 结束值，否则返回 `None`
 fn parse_coord_range(s: &str) -> Option<(u16, u16)> {
     if let Some((a, b)) = s.split_once(':') {
